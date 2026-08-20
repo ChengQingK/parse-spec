@@ -1,5 +1,4 @@
-/* Parse-Spec 前端：pdf.js 渲染、可复制文本层、句子选择与持久分析侧栏。
-   悬停只预览句子范围；单击才请求后端并锁定分析结果。 */
+/* Parse-Spec 前端：pdf.js 渲染、可复制文本层、句子选择、主题/解析程度设置与可停靠分析栏。 */
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdf.worker.min.js";
 
@@ -14,7 +13,19 @@ const panelToggle = document.getElementById("panel-toggle");
 const panelClose = document.getElementById("panel-close");
 const panelResizer = document.getElementById("panel-resizer");
 const docMeta = document.getElementById("doc-meta");
+const settingsToggle = document.getElementById("settings-toggle");
+const settingsPopover = document.getElementById("settings-popover");
+const settingsClose = document.getElementById("settings-close");
+const themeSelect = document.getElementById("theme-select");
+const depthSelect = document.getElementById("depth-select");
+const positionSelect = document.getElementById("position-select");
+const settingsReset = document.getElementById("settings-reset");
 
+const SETTINGS_KEY = "parse-spec:settings";
+const DEFAULT_SETTINGS = Object.freeze({ theme: "light", analysisDepth: "standard", panelPosition: "right" });
+const VALID_THEMES = new Set(["light", "dark", "eye"]);
+const VALID_DEPTHS = new Set(["concise", "standard", "detailed"]);
+const VALID_POSITIONS = new Set(["left", "right", "top", "bottom", "off"]);
 const sentenceResults = new Map();
 
 let currentPdf = null;
@@ -23,6 +34,79 @@ let selectedTarget = null;
 let requestSerial = 0;
 let panelCollapsed = false;
 let resizeStart = null;
+let uiSettings = loadSettings();
+let panelPosition = uiSettings.panelPosition;
+
+/* ---------------- 设置 ---------------- */
+
+function loadSettings() {
+  try {
+    const raw = window.localStorage && window.localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return { ...DEFAULT_SETTINGS };
+    const parsed = JSON.parse(raw);
+    return {
+      theme: VALID_THEMES.has(parsed.theme) ? parsed.theme : DEFAULT_SETTINGS.theme,
+      analysisDepth: VALID_DEPTHS.has(parsed.analysisDepth) ? parsed.analysisDepth : DEFAULT_SETTINGS.analysisDepth,
+      panelPosition: VALID_POSITIONS.has(parsed.panelPosition) ? parsed.panelPosition : DEFAULT_SETTINGS.panelPosition,
+    };
+  } catch (_ignored) {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function saveSettings() {
+  try {
+    if (window.localStorage) window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(uiSettings));
+  } catch (_ignored) {}
+}
+
+function syncSettingsControls() {
+  if (themeSelect) themeSelect.value = uiSettings.theme;
+  if (depthSelect) depthSelect.value = uiSettings.analysisDepth;
+  if (positionSelect) positionSelect.value = uiSettings.panelPosition;
+}
+
+function setTheme(theme, persist = true) {
+  const next = VALID_THEMES.has(theme) ? theme : DEFAULT_SETTINGS.theme;
+  uiSettings.theme = next;
+  if (document.documentElement && document.documentElement.dataset) document.documentElement.dataset.theme = next;
+  if (themeSelect) themeSelect.value = next;
+  if (persist) saveSettings();
+}
+
+function setAnalysisDepth(depth, persist = true) {
+  const next = VALID_DEPTHS.has(depth) ? depth : DEFAULT_SETTINGS.analysisDepth;
+  uiSettings.analysisDepth = next;
+  if (depthSelect) depthSelect.value = next;
+  if (persist) saveSettings();
+  refreshSelectedAnalysis(false);
+}
+
+function openSettings() {
+  if (!settingsPopover || !settingsToggle) return;
+  settingsPopover.hidden = false;
+  settingsToggle.setAttribute("aria-expanded", "true");
+}
+
+function closeSettings() {
+  if (!settingsPopover || !settingsToggle) return;
+  settingsPopover.hidden = true;
+  settingsToggle.setAttribute("aria-expanded", "false");
+}
+
+function toggleSettings() {
+  if (!settingsPopover || settingsPopover.hidden) openSettings();
+  else closeSettings();
+}
+
+function resetSettings() {
+  uiSettings = { ...DEFAULT_SETTINGS };
+  setTheme(uiSettings.theme, false);
+  setAnalysisDepth(uiSettings.analysisDepth, false);
+  setPanelPosition(uiSettings.panelPosition, false, true);
+  saveSettings();
+  syncSettingsControls();
+}
 
 /* ---------------- 句子切分 ---------------- */
 
@@ -89,13 +173,7 @@ function toWords(items, viewport, scale) {
     let cursorX = point[0];
     for (const part of parts) {
       const partWidth = itemWidth * (part.length / totalChars);
-      words.push({
-        text: part,
-        x0: cursorX,
-        y0: point[1] - fontSize,
-        x1: cursorX + partWidth,
-        y1: point[1],
-      });
+      words.push({ text: part, x0: cursorX, y0: point[1] - fontSize, x1: cursorX + partWidth, y1: point[1] });
       cursorX += partWidth + (parts.length > 1 ? itemWidth * .02 : 0);
     }
   }
@@ -127,12 +205,7 @@ async function renderPage(pdf, pageNum, container) {
   textLayer.style.width = `${canvas.width}px`;
   textLayer.style.height = `${canvas.height}px`;
   wrap.appendChild(textLayer);
-  await pdfjsLib.renderTextLayer({
-    textContent,
-    container: textLayer,
-    viewport,
-    textDivs: [],
-  }).promise;
+  await pdfjsLib.renderTextLayer({ textContent, container: textLayer, viewport, textDivs: [] }).promise;
   textLayer.style.visibility = "visible";
   wireTextLayer(textLayer, wrap, sentences, words, pageNum);
   console.log(`P${pageNum}: ${words.length} 词, ${sentences.length} 句`);
@@ -200,13 +273,7 @@ function wireTextLayer(textLayer, wrap, sentences, words, pageNum) {
   }
 
   for (const [sentenceIndex, spans] of sentenceGroups) {
-    const target = {
-      key: `${pageNum}:${sentenceIndex}`,
-      pageNum,
-      sentenceIndex,
-      text: sentenceTexts[sentenceIndex],
-      spans,
-    };
+    const target = { key: `${pageNum}:${sentenceIndex}`, pageNum, sentenceIndex, text: sentenceTexts[sentenceIndex], spans };
     for (const span of spans) {
       span.addEventListener("mouseenter", () => setPreview(target));
       span.addEventListener("mouseleave", () => clearPreview(target));
@@ -257,12 +324,15 @@ function clearSelection({ renderEmpty = true } = {}) {
 
 function selectSentence(target) {
   if (!target || !target.text) return;
-  if (selectedTarget && selectedTarget.key !== target.key) {
-    removeClassFromSpans(selectedTarget, "is-selected");
-  }
+  if (selectedTarget && selectedTarget.key !== target.key) removeClassFromSpans(selectedTarget, "is-selected");
   clearPreview();
   selectedTarget = target;
   addClassToSpans(target, "is-selected");
+  if (panelPosition === "off") {
+    requestSerial++;
+    setPanelCollapsed(true);
+    return;
+  }
   setPanelCollapsed(false);
   const requestId = ++requestSerial;
   renderLoadingPanel(target);
@@ -296,8 +366,20 @@ async function loadAndRender(target, requestId, force = false) {
       return;
     }
   }
-  if (requestId !== requestSerial || !selectedTarget || selectedTarget.key !== target.key) return;
+  if (requestId !== requestSerial || !selectedTarget || selectedTarget.key !== target.key || panelPosition === "off") return;
   renderAnalysisPanel(target, result);
+}
+
+function refreshSelectedAnalysis(loadIfMissing = true) {
+  if (!selectedTarget || panelPosition === "off") return;
+  const cached = sentenceResults.get(selectedTarget.text);
+  if (cached) {
+    renderAnalysisPanel(selectedTarget, cached);
+  } else if (loadIfMissing) {
+    const requestId = ++requestSerial;
+    renderLoadingPanel(selectedTarget);
+    loadAndRender(selectedTarget, requestId);
+  }
 }
 
 /* ---------------- 分析栏渲染 ---------------- */
@@ -306,7 +388,7 @@ function renderEmptyPanel() {
   analysisContent.innerHTML = `<div class="panel-empty">
     <span class="panel-empty-icon">↗</span>
     <h3>从 PDF 中选择一句话</h3>
-    <p>悬停查看句子范围，单击锁定分析。选中状态不会随鼠标移开而消失。</p>
+    <p>悬停查看句子范围，单击锁定分析。面板位置、主题和解析程度可在“设置”中调整。</p>
   </div>`;
 }
 
@@ -343,15 +425,15 @@ function confidenceText(value) {
   return "低可信";
 }
 
+function depthText(depth) {
+  return ({ concise: "简洁", standard: "标准", detailed: "详细" })[depth] || "标准";
+}
+
 function grammarRows(grammar, compact = false) {
   if (!grammar) return "";
   const rows = [
-    ["主语", grammar.subject],
-    ["谓语", grammar.predicate],
-    ["宾语", grammar.object],
-    ["执行者", grammar.agent],
-    ["补语", grammar.complement],
-    ["情态", grammar.modality],
+    ["主语", grammar.subject], ["谓语", grammar.predicate], ["宾语", grammar.object],
+    ["执行者", grammar.agent], ["补语", grammar.complement], ["情态", grammar.modality],
   ].filter((row) => row[1]);
   if (!compact) {
     rows.push(["语态", grammar.voice === "passive" ? "被动" : "主动"]);
@@ -360,20 +442,18 @@ function grammarRows(grammar, compact = false) {
   return rows.map(([label, value]) => `<span class="grammar-label">${esc(label)}</span><span class="grammar-value">${esc(value)}</span>`).join("");
 }
 
-function renderTreeNode(clause, childrenByParent) {
+function renderTreeNode(clause, childrenByParent, detailed = false) {
   const children = (childrenByParent.get(clause.id) || []).slice().sort((a, b) => a.order - b.order);
-  const warnings = (clause.warnings || []).map((warning) => `<div class="node-warning">${esc(warning)}</div>`).join("");
+  const warnings = detailed ? (clause.warnings || []).map((warning) => `<div class="node-warning">${esc(warning)}</div>`).join("") : "";
   const grammar = grammarRows(clause.grammar);
   const childHtml = children.length
-    ? `<ol class="tree-children">${children.map((child) => renderTreeNode(child, childrenByParent)).join("")}</ol>`
+    ? `<ol class="tree-children">${children.map((child) => renderTreeNode(child, childrenByParent, detailed)).join("")}</ol>`
     : "";
+  const confidence = detailed ? `<span class="confidence-badge">${confidenceText(Number(clause.confidence || 0))}</span>` : "";
   return `<li class="tree-item" data-clause-id="${esc(clause.id)}">
-    <details class="tree-node relation-${esc(clause.relation || "ambiguous")}" open>
+    <details class="tree-node relation-${esc(clause.relation || "ambiguous")}"${detailed ? " open" : ""}>
       <summary>
-        <div class="tree-summary-row">
-          <span class="relation-badge">${esc(clause.label || clause.relation)}</span>
-          <span class="confidence-badge">${confidenceText(Number(clause.confidence || 0))}</span>
-        </div>
+        <div class="tree-summary-row"><span class="relation-badge">${esc(clause.label || clause.relation)}</span>${confidence}</div>
         <div class="node-text">${esc(clause.text)}</div>
       </summary>
       ${(grammar || warnings) ? `<div class="node-detail"><div class="grammar-grid">${grammar}</div>${warnings}</div>` : ""}
@@ -389,11 +469,8 @@ function renderSourceText(text, segments = []) {
     .sort((a, b) => a[0] - b[0]);
   const merged = [];
   for (const segment of normalized) {
-    if (merged.length && segment[0] <= merged[merged.length - 1][1]) {
-      merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], segment[1]);
-    } else {
-      merged.push(segment.slice());
-    }
+    if (merged.length && segment[0] <= merged[merged.length - 1][1]) merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], segment[1]);
+    else merged.push(segment.slice());
   }
   if (!merged.length) return esc(text);
   let cursor = 0;
@@ -412,6 +489,9 @@ function renderAnalysisPanel(target, result) {
     renderErrorPanel(target, new Error("返回的数据缺少逻辑分句"));
     return;
   }
+  const depth = uiSettings.analysisDepth;
+  const detailed = depth === "detailed";
+  const concise = depth === "concise";
   const clausesById = new Map(result.clauses.map((clause) => [clause.id, clause]));
   const childrenByParent = new Map();
   for (const clause of result.clauses) {
@@ -420,8 +500,8 @@ function renderAnalysisPanel(target, result) {
     childrenByParent.get(clause.parent_id).push(clause);
   }
   const main = clausesById.get(result.main_clause_id) || result.clauses[0];
-  const treeHtml = renderTreeNode(main, childrenByParent);
-  const translationHtml = result.translation && result.translation.text
+  const treeHtml = concise ? "" : renderTreeNode(main, childrenByParent, detailed);
+  const translationHtml = detailed && result.translation && result.translation.text
     ? `<section class="analysis-section"><h3 class="section-heading">推荐译文</h3><div class="translation-card"><p class="translation-text">${esc(result.translation.text)}</p></div></section>`
     : "";
   const skeleton = grammarRows(main.grammar, true);
@@ -431,54 +511,80 @@ function renderAnalysisPanel(target, result) {
   const termsHtml = Array.isArray(result.terms) && result.terms.length
     ? `<ul class="term-list">${result.terms.map((term) => `<li class="term-item">
         <span class="term-word">${esc(term.word)}</span><span class="term-pos">${esc(term.pos || "")}</span><span class="term-zh">${esc(term.zh || "")}</span>
-        ${term.note ? `<span class="term-note">${esc(term.note)}</span>` : ""}
+        ${detailed && term.note ? `<span class="term-note">${esc(term.note)}</span>` : ""}
       </li>`).join("")}</ul>`
     : `<div class="empty-copy">本句没有命中已收录术语</div>`;
-  const globalWarnings = (result.warnings || []).map((warning) => `<div class="global-warning">${esc(warning)}</div>`).join("");
+  const globalWarnings = detailed ? (result.warnings || []).map((warning) => `<div class="global-warning">${esc(warning)}</div>`).join("") : "";
   const engineName = result.engine === "spacy" ? "spaCy 本地解析" : "规则降级解析";
+  const logicSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">逻辑结构</h3><ol class="logic-tree">${treeHtml}</ol></section>`;
+  const termsSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">复杂词 / 术语</h3>${termsHtml}</section>`;
+  const conciseCore = concise ? `<section class="analysis-section concise-core"><h3 class="section-heading">核心命题</h3><div class="core-card">${esc(main.text)}</div></section>` : "";
 
   analysisContent.innerHTML = `<div class="sentence-meta">
       <span>第 ${target.pageNum} 页 · 句子 ${target.sentenceIndex + 1}</span>
-      <span class="engine-badge">${engineName}</span>
+      <span class="meta-badges"><span class="depth-badge">${depthText(depth)}</span><span class="engine-badge">${engineName}</span></span>
     </div>
     <div class="source-card"><p class="source-text" id="panel-source-text">${esc(result.text || target.text)}</p></div>
-    ${translationHtml}
-    <section class="analysis-section">
-      <h3 class="section-heading">逻辑结构</h3>
-      <ol class="logic-tree">${treeHtml}</ol>
-    </section>
-    <section class="analysis-section">
-      <h3 class="section-heading">主句主干</h3>
-      <div class="skeleton-card">${skeleton}${skeletonExtra}</div>
-    </section>
-    <section class="analysis-section">
-      <h3 class="section-heading">复杂词 / 术语</h3>
-      ${termsHtml}
-    </section>
-    ${globalWarnings}`;
+    ${translationHtml}${conciseCore}${logicSection}
+    <section class="analysis-section"><h3 class="section-heading">主句主干</h3><div class="skeleton-card">${skeleton}${skeletonExtra}</div></section>
+    ${termsSection}${globalWarnings}`;
 
   const sourceElement = document.getElementById("panel-source-text");
-  if (sourceElement) {
+  if (sourceElement && !concise) {
     for (const item of analysisContent.querySelectorAll("[data-clause-id]")) {
       const clause = clausesById.get(item.dataset.clauseId);
       if (!clause) continue;
       item.addEventListener("mouseenter", () => {
         sourceElement.innerHTML = renderSourceText(result.text || target.text, clause.segments || [[clause.start, clause.end]]);
       });
-      item.addEventListener("mouseleave", () => {
-        sourceElement.textContent = result.text || target.text;
-      });
+      item.addEventListener("mouseleave", () => { sourceElement.textContent = result.text || target.text; });
     }
   }
 }
 
-/* ---------------- 分析栏开关与尺寸 ---------------- */
+/* ---------------- 分析栏开关、停靠与尺寸 ---------------- */
+
+function isHorizontalPanel() {
+  return panelPosition === "left" || panelPosition === "right";
+}
+
+function updatePanelControls() {
+  const disabled = panelPosition === "off";
+  if (panelToggle) {
+    panelToggle.disabled = disabled;
+    panelToggle.setAttribute("aria-expanded", String(!panelCollapsed && !disabled));
+    panelToggle.textContent = disabled ? "分析已关闭" : (panelCollapsed ? "展开分析" : "收起分析");
+  }
+  if (panelResizer) {
+    const vertical = isHorizontalPanel();
+    panelResizer.setAttribute("aria-orientation", vertical ? "vertical" : "horizontal");
+    panelResizer.setAttribute("aria-label", vertical ? "调整分析栏宽度" : "调整分析栏高度");
+  }
+}
 
 function setPanelCollapsed(collapsed) {
-  panelCollapsed = !!collapsed;
+  panelCollapsed = !!collapsed || panelPosition === "off";
   workspace.classList.toggle("panel-collapsed", panelCollapsed);
-  panelToggle.setAttribute("aria-expanded", String(!panelCollapsed));
-  panelToggle.textContent = panelCollapsed ? "展开分析" : "收起分析";
+  updatePanelControls();
+}
+
+function setPanelPosition(position, persist = true, openAfterChange = true) {
+  const next = VALID_POSITIONS.has(position) ? position : DEFAULT_SETTINGS.panelPosition;
+  panelPosition = next;
+  uiSettings.panelPosition = next;
+  if (workspace && workspace.dataset) workspace.dataset.panelPosition = next;
+  if (positionSelect) positionSelect.value = next;
+  if (next === "off") {
+    requestSerial++;
+    setPanelCollapsed(true);
+  } else if (openAfterChange) {
+    setPanelCollapsed(false);
+    refreshSelectedAnalysis(true);
+  } else {
+    setPanelCollapsed(panelCollapsed);
+  }
+  updatePanelControls();
+  if (persist) saveSettings();
 }
 
 function closeAnalysisPanel() {
@@ -487,70 +593,131 @@ function closeAnalysisPanel() {
   setPanelCollapsed(true);
 }
 
-function panelWidth() {
-  const raw = getComputedStyle(document.documentElement).getPropertyValue("--panel-width");
-  return Number.parseInt(raw, 10) || 440;
+function cssNumber(name, fallback) {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name);
+  return Number.parseInt(raw, 10) || fallback;
 }
+
+function panelWidth() { return cssNumber("--panel-width", 440); }
+function panelHeight() { return cssNumber("--panel-height", 340); }
 
 function setPanelWidth(width, persist = false) {
   const clamped = Math.max(340, Math.min(620, Math.round(width)));
   document.documentElement.style.setProperty("--panel-width", `${clamped}px`);
-  panelResizer.setAttribute("aria-valuenow", String(clamped));
+  if (panelResizer && isHorizontalPanel()) {
+    panelResizer.setAttribute("aria-valuemin", "340");
+    panelResizer.setAttribute("aria-valuemax", "620");
+    panelResizer.setAttribute("aria-valuenow", String(clamped));
+  }
   if (persist && window.localStorage) {
     try { window.localStorage.setItem("parse-spec:panel-width", String(clamped)); } catch (_ignored) {}
   }
 }
 
-function restorePanelWidth() {
+function setPanelHeight(height, persist = false) {
+  const clamped = Math.max(220, Math.min(560, Math.round(height)));
+  document.documentElement.style.setProperty("--panel-height", `${clamped}px`);
+  if (panelResizer && !isHorizontalPanel()) {
+    panelResizer.setAttribute("aria-valuemin", "220");
+    panelResizer.setAttribute("aria-valuemax", "560");
+    panelResizer.setAttribute("aria-valuenow", String(clamped));
+  }
+  if (persist && window.localStorage) {
+    try { window.localStorage.setItem("parse-spec:panel-height", String(clamped)); } catch (_ignored) {}
+  }
+}
+
+function restorePanelSize() {
   try {
-    const saved = window.localStorage && Number(window.localStorage.getItem("parse-spec:panel-width"));
-    if (saved) setPanelWidth(saved);
+    const savedWidth = window.localStorage && Number(window.localStorage.getItem("parse-spec:panel-width"));
+    const savedHeight = window.localStorage && Number(window.localStorage.getItem("parse-spec:panel-height"));
+    if (savedWidth) setPanelWidth(savedWidth);
+    if (savedHeight) setPanelHeight(savedHeight);
   } catch (_ignored) {}
 }
+
+function restorePanelWidth() { restorePanelSize(); }
 
 function isNarrowViewport() {
   return !!(window.matchMedia && window.matchMedia("(max-width: 760px)").matches);
 }
 
 function startResize(event) {
-  if (isNarrowViewport()) return;
-  resizeStart = { x: event.clientX, width: panelWidth() };
+  if (isNarrowViewport() || panelPosition === "off") return;
+  resizeStart = { x: event.clientX, y: event.clientY, width: panelWidth(), height: panelHeight(), position: panelPosition };
   panelResizer.classList.add("is-dragging");
-  document.body.classList.add("is-resizing");
+  document.body.classList.add(isHorizontalPanel() ? "is-resizing-x" : "is-resizing-y");
   if (panelResizer.setPointerCapture && event.pointerId !== undefined) panelResizer.setPointerCapture(event.pointerId);
 }
 
 function moveResize(event) {
   if (!resizeStart) return;
-  setPanelWidth(resizeStart.width + resizeStart.x - event.clientX);
+  if (resizeStart.position === "right") setPanelWidth(resizeStart.width + resizeStart.x - event.clientX);
+  else if (resizeStart.position === "left") setPanelWidth(resizeStart.width + event.clientX - resizeStart.x);
+  else if (resizeStart.position === "bottom") setPanelHeight(resizeStart.height + resizeStart.y - event.clientY);
+  else if (resizeStart.position === "top") setPanelHeight(resizeStart.height + event.clientY - resizeStart.y);
 }
 
 function endResize() {
   if (!resizeStart) return;
+  const horizontal = resizeStart.position === "left" || resizeStart.position === "right";
   resizeStart = null;
   panelResizer.classList.remove("is-dragging");
-  document.body.classList.remove("is-resizing");
-  setPanelWidth(panelWidth(), true);
+  document.body.classList.remove("is-resizing-x");
+  document.body.classList.remove("is-resizing-y");
+  if (horizontal) setPanelWidth(panelWidth(), true);
+  else setPanelHeight(panelHeight(), true);
 }
 
-panelToggle.addEventListener("click", () => {
+function resizeByKeyboard(event) {
+  if (panelPosition === "off") return;
+  const step = 16;
+  if (panelPosition === "right" && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    event.preventDefault();
+    setPanelWidth(panelWidth() + (event.key === "ArrowLeft" ? step : -step), true);
+  } else if (panelPosition === "left" && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    event.preventDefault();
+    setPanelWidth(panelWidth() + (event.key === "ArrowRight" ? step : -step), true);
+  } else if (panelPosition === "bottom" && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+    event.preventDefault();
+    setPanelHeight(panelHeight() + (event.key === "ArrowUp" ? step : -step), true);
+  } else if (panelPosition === "top" && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+    event.preventDefault();
+    setPanelHeight(panelHeight() + (event.key === "ArrowDown" ? step : -step), true);
+  }
+}
+
+if (panelToggle) panelToggle.addEventListener("click", () => {
+  if (panelPosition === "off") return;
   if (panelCollapsed) {
     setPanelCollapsed(false);
-  } else {
-    closeAnalysisPanel();
-  }
+    refreshSelectedAnalysis(true);
+  } else closeAnalysisPanel();
 });
-panelClose.addEventListener("click", closeAnalysisPanel);
-panelResizer.addEventListener("pointerdown", startResize);
+if (panelClose) panelClose.addEventListener("click", closeAnalysisPanel);
+if (panelResizer) {
+  panelResizer.addEventListener("pointerdown", startResize);
+  panelResizer.addEventListener("keydown", resizeByKeyboard);
+}
 window.addEventListener("pointermove", moveResize);
 window.addEventListener("pointerup", endResize);
-panelResizer.addEventListener("keydown", (event) => {
-  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-  event.preventDefault();
-  setPanelWidth(panelWidth() + (event.key === "ArrowLeft" ? 16 : -16), true);
-});
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && (selectedTarget || !panelCollapsed)) closeAnalysisPanel();
+  if (event.key === "Escape") {
+    if (settingsPopover && !settingsPopover.hidden) closeSettings();
+    else if (selectedTarget || (!panelCollapsed && panelPosition !== "off")) closeAnalysisPanel();
+  }
+});
+
+if (settingsToggle) settingsToggle.addEventListener("click", (event) => { if (event.stopPropagation) event.stopPropagation(); toggleSettings(); });
+if (settingsClose) settingsClose.addEventListener("click", closeSettings);
+if (themeSelect) themeSelect.addEventListener("change", (event) => setTheme(event.target.value));
+if (depthSelect) depthSelect.addEventListener("change", (event) => setAnalysisDepth(event.target.value));
+if (positionSelect) positionSelect.addEventListener("change", (event) => setPanelPosition(event.target.value));
+if (settingsReset) settingsReset.addEventListener("click", resetSettings);
+document.addEventListener("click", (event) => {
+  if (!settingsPopover || settingsPopover.hidden || !settingsToggle) return;
+  if (settingsPopover.contains(event.target) || settingsToggle.contains(event.target)) return;
+  closeSettings();
 });
 
 /* ---------------- 文件加载 ---------------- */
@@ -562,7 +729,7 @@ async function openPdf(file) {
   sentenceResults.clear();
   clearPreview();
   clearSelection();
-  setPanelCollapsed(isNarrowViewport());
+  setPanelCollapsed(panelPosition === "off" || isNarrowViewport());
   docMeta.textContent = `${file.name} · 加载中`;
   try {
     const data = await file.arrayBuffer();
@@ -581,6 +748,7 @@ async function openPdf(file) {
 }
 
 function bindFileInput(input) {
+  if (!input) return;
   input.addEventListener("change", (event) => {
     const file = event.target.files && event.target.files[0];
     openPdf(file);
@@ -589,8 +757,11 @@ function bindFileInput(input) {
 
 bindFileInput(fileInput);
 bindFileInput(emptyFileInput);
-restorePanelWidth();
-setPanelCollapsed(isNarrowViewport());
+setTheme(uiSettings.theme, false);
+syncSettingsControls();
+restorePanelSize();
+setPanelPosition(uiSettings.panelPosition, false, false);
+setPanelCollapsed(panelPosition === "off" || isNarrowViewport());
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => (

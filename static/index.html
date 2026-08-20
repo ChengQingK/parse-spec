@@ -1,10 +1,11 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Parse-Spec · 英文长难句解析</title>
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/settings.css">
 </head>
 <body>
 <header class="topbar">
@@ -13,18 +14,57 @@
     <span class="sub">本地离线 · 阅读与拆解英文技术文档</span>
   </div>
   <span class="doc-meta" id="doc-meta">尚未打开 PDF</span>
+  <div class="settings-wrap">
+    <button class="icon-btn settings-toggle" id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings-popover">设置</button>
+    <section class="settings-popover" id="settings-popover" aria-label="阅读与解析设置" hidden>
+      <div class="settings-heading">
+        <div>
+          <div class="eyebrow">Preferences</div>
+          <h2>设置</h2>
+        </div>
+        <button class="icon-btn settings-close" id="settings-close" type="button" aria-label="关闭设置">×</button>
+      </div>
+      <label class="setting-row" for="theme-select">
+        <span><strong>颜色主题</strong><small>调整页面背景与分析栏配色</small></span>
+        <select id="theme-select">
+          <option value="light">浅色</option>
+          <option value="dark">暗色</option>
+          <option value="eye">护眼色</option>
+        </select>
+      </label>
+      <label class="setting-row" for="depth-select">
+        <span><strong>解析程度</strong><small>控制分析结果展示的信息密度</small></span>
+        <select id="depth-select">
+          <option value="concise">简洁</option>
+          <option value="standard">标准</option>
+          <option value="detailed">详细</option>
+        </select>
+      </label>
+      <label class="setting-row" for="position-select">
+        <span><strong>分析栏位置</strong><small>内容会按可用空间自动重排</small></span>
+        <select id="position-select">
+          <option value="right">右侧</option>
+          <option value="left">左侧</option>
+          <option value="top">上侧</option>
+          <option value="bottom">下侧</option>
+          <option value="off">关闭</option>
+        </select>
+      </label>
+      <button class="settings-reset" id="settings-reset" type="button">恢复默认设置</button>
+    </section>
+  </div>
   <button class="icon-btn panel-toggle" id="panel-toggle" type="button" aria-expanded="true" aria-controls="analysis-panel">收起分析</button>
   <label class="btn filebtn">选择 PDF
     <input type="file" id="file" accept="application/pdf" hidden>
   </label>
 </header>
 
-<main class="workspace" id="workspace">
+<main class="workspace" id="workspace" data-panel-position="right">
   <section id="doc" class="document-pane" aria-label="PDF 阅读区">
     <div class="placeholder" id="placeholder">
       <span class="placeholder-mark">PS</span>
       <h1>打开一篇英文 SPEC</h1>
-      <p>悬停可预览句子范围，单击后在右侧查看逻辑结构、语法主干和术语解释。</p>
+      <p>悬停可预览句子范围，单击后在分析面板查看逻辑结构、语法主干和术语解释。</p>
       <label class="btn placeholder-btn">选择 PDF
         <input type="file" id="file-empty" accept="application/pdf" hidden>
       </label>
@@ -46,7 +86,7 @@
       <div class="panel-empty">
         <span class="panel-empty-icon">↗</span>
         <h3>从 PDF 中选择一句话</h3>
-        <p>悬停查看句子范围，单击锁定分析。选中状态不会随鼠标移开而消失。</p>
+        <p>悬停查看句子范围，单击锁定分析。面板位置、主题和解析程度可在“设置”中调整。</p>
       </div>
     </div>
   </aside>
