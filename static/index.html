@@ -3,31 +3,54 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Parse-Spec · 英文长难句悬浮解析</title>
+<title>Parse-Spec · 英文长难句解析</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="topbar">
-  <span class="brand">Parse-Spec</span>
-  <span class="sub">本地离线 · 悬浮解析英文长难句（断句 / 成分 / 复杂词）</span>
+  <div class="brand-group">
+    <span class="brand">Parse-Spec</span>
+    <span class="sub">本地离线 · 阅读与拆解英文技术文档</span>
+  </div>
+  <span class="doc-meta" id="doc-meta">尚未打开 PDF</span>
+  <button class="icon-btn panel-toggle" id="panel-toggle" type="button" aria-expanded="true" aria-controls="analysis-panel">收起分析</button>
   <label class="btn filebtn">选择 PDF
     <input type="file" id="file" accept="application/pdf" hidden>
   </label>
 </header>
 
-<main id="doc">
-  <div class="placeholder" id="placeholder">
-    <p>点击右上角「选择 PDF」打开一篇 SPEC 文献。</p>
-    <p>打开后：</p>
-    <ul>
-      <li><b>悬浮</b>到一句话上，句子会高亮，旁边弹出浮窗。</li>
-      <li>浮窗展示：<b>断句分块</b>、<b>主句主干（主语/谓语）</b>、<b>复杂词释义</b>。</li>
-    </ul>
-  </div>
-  <div id="pages"></div>
-</main>
+<main class="workspace" id="workspace">
+  <section id="doc" class="document-pane" aria-label="PDF 阅读区">
+    <div class="placeholder" id="placeholder">
+      <span class="placeholder-mark">PS</span>
+      <h1>打开一篇英文 SPEC</h1>
+      <p>悬停可预览句子范围，单击后在右侧查看逻辑结构、语法主干和术语解释。</p>
+      <label class="btn placeholder-btn">选择 PDF
+        <input type="file" id="file-empty" accept="application/pdf" hidden>
+      </label>
+    </div>
+    <div id="pages"></div>
+  </section>
 
-<div id="tooltip" class="tooltip" hidden></div>
+  <div id="panel-resizer" class="panel-resizer" role="separator" aria-label="调整分析栏宽度" aria-orientation="vertical" tabindex="0"></div>
+
+  <aside id="analysis-panel" class="analysis-panel" aria-label="句子分析栏">
+    <header class="panel-header">
+      <div>
+        <div class="eyebrow">Sentence analysis</div>
+        <h2>句子分析</h2>
+      </div>
+      <button id="panel-close" class="icon-btn close-btn" type="button" aria-label="收起分析栏">×</button>
+    </header>
+    <div id="analysis-content" class="analysis-content" aria-live="polite">
+      <div class="panel-empty">
+        <span class="panel-empty-icon">↗</span>
+        <h3>从 PDF 中选择一句话</h3>
+        <p>悬停查看句子范围，单击锁定分析。选中状态不会随鼠标移开而消失。</p>
+      </div>
+    </div>
+  </aside>
+</main>
 
 <script src="/static/pdf.min.js"></script>
 <script src="/static/viewer.js"></script>

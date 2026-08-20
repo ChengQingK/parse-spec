@@ -1,13 +1,13 @@
 {
   "name": "parse-spec",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "本地离线的英文 SPEC PDF 长难句逻辑树解析工具",
+  "private": true,
   "directories": {
     "doc": "docs"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test tests/frontend.test.js"
   },
   "keywords": [],
   "author": "",
