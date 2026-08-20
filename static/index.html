@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parse-Spec · 英文长难句悬浮解析</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <span class="brand">Parse-Spec</span>
+  <span class="sub">本地离线 · 悬浮解析英文长难句（断句 / 成分 / 复杂词）</span>
+  <label class="btn filebtn">选择 PDF
+    <input type="file" id="file" accept="application/pdf" hidden>
+  </label>
+</header>
+
+<main id="doc">
+  <div class="placeholder" id="placeholder">
+    <p>点击右上角「选择 PDF」打开一篇 SPEC 文献。</p>
+    <p>打开后：</p>
+    <ul>
+      <li><b>悬浮</b>到一句话上，句子会高亮，旁边弹出浮窗。</li>
+      <li>浮窗展示：<b>断句分块</b>、<b>主句主干（主语/谓语）</b>、<b>复杂词释义</b>。</li>
+    </ul>
+  </div>
+  <div id="pages"></div>
+</main>
+
+<div id="tooltip" class="tooltip" hidden></div>
+
+<script src="/static/pdf.min.js"></script>
+<script src="/static/viewer.js"></script>
+</body>
+</html>
