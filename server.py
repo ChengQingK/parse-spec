@@ -14,7 +14,6 @@ import os
 from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
-import re
 import sys
 
 
@@ -36,10 +35,24 @@ except ModuleNotFoundError as exc:
             "  uv pip install --python .venv\\Scripts\\python.exe "
             "-r requirements.txt .\\vendor\\en_core_web_sm-3.8.0-py3-none-any.whl"
         ) from exc
-    os.execv(
-        str(project_python),
-        [str(project_python), str(Path(__file__).resolve()), *sys.argv[1:]],
-    )
+    command = [str(project_python), str(Path(__file__).resolve()), *sys.argv[1:]]
+    if os.name == "nt":
+        # Windows 的商店版 Python 对 os.execv 的进程接管行为不稳定，显式等待子进程。
+        import subprocess
+
+        child = subprocess.Popen(command)
+        try:
+            raise SystemExit(child.wait())
+        except KeyboardInterrupt:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+            raise SystemExit(130) from None
+    os.execv(str(project_python), command)
 
 from parse.clauser import parse_sentence
 from parse.glossary import Glossary
@@ -49,19 +62,27 @@ STATIC = os.path.join(BASE, "static")
 
 app = Flask(__name__, static_folder=None)
 
-_glossary = Glossary(os.path.join(BASE, "glossary.json"))  # 用户可自定义
+_glossary_path = Path(BASE) / "glossary.json"
+_glossary = Glossary(str(_glossary_path))  # 用户可自定义
+_glossary_signature: tuple[int, int] | None = None
 MAX_SENTENCES = 32
 MAX_SENTENCE_CHARS = 10_000
+MAX_REQUEST_BYTES = 400_000
+app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
 
 @lru_cache(maxsize=1024)
 def _analyze_sentence(s: str) -> dict:
     sentence = s.strip()
     ps = parse_sentence(sentence)
-    # 收集句中"复杂词"（词典命中的词）
+    # 优先使用 spaCy 的原始词形与 lemma；规则降级结果也提供同构候选词。
     words_hit = {}
-    for tok in re.findall(r"[A-Za-z]+(?:['-][A-Za-z]+)*", sentence):
+    for tok, lemma in ps.term_candidates:
         d = _glossary.lookup(tok)
+        if d is None and lemma and lemma.lower() != tok.lower():
+            d = _glossary.lookup(lemma)
+            if d is not None:
+                d = {**d, "word": tok, "variant": True}
         if d and tok.lower() not in words_hit:
             words_hit[tok.lower()] = d
     words = sorted(words_hit.values(), key=lambda x: (x["pos"], x["word"]))
@@ -76,6 +97,25 @@ def _analyze_sentence(s: str) -> dict:
         "translation": None,
         "warnings": ps.warnings,
     }
+
+
+def _current_glossary_signature() -> tuple[int, int] | None:
+    try:
+        stat = _glossary_path.stat()
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
+
+def _refresh_glossary_if_changed() -> None:
+    """在用户保存词典后自动重载，并清除包含旧词义的分析缓存。"""
+    global _glossary, _glossary_signature
+    signature = _current_glossary_signature()
+    if signature == _glossary_signature:
+        return
+    _glossary = Glossary(str(_glossary_path))
+    _glossary_signature = signature
+    _analyze_sentence.cache_clear()
 
 
 @app.get("/")
@@ -102,10 +142,31 @@ def analyze():
         return jsonify({"error": f"单次最多解析 {MAX_SENTENCES} 个句子"}), 400
     if any(not isinstance(sentence, str) for sentence in sentences):
         return jsonify({"error": "sentences 中的每一项都必须是字符串"}), 400
+    if any(not sentence.strip() for sentence in sentences):
+        return jsonify({"error": "sentences 中不能包含空句子"}), 400
     if any(len(sentence) > MAX_SENTENCE_CHARS for sentence in sentences):
         return jsonify({"error": f"单句不能超过 {MAX_SENTENCE_CHARS} 个字符"}), 400
-    results = [_analyze_sentence(s) for s in sentences]
+    _refresh_glossary_if_changed()
+    results = [_analyze_sentence(s.strip()) for s in sentences]
     return jsonify({"results": results})
+
+
+@app.errorhandler(413)
+def request_too_large(_error):
+    return jsonify({"error": f"请求体不能超过 {MAX_REQUEST_BYTES} 字节"}), 413
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; worker-src 'self' blob:; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+        "font-src 'self' data: blob:; connect-src 'self'; object-src 'none'; "
+        "base-uri 'none'; frame-ancestors 'none'"
+    )
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 if __name__ == "__main__":

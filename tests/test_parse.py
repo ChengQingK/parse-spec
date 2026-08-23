@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from parse.clauser import parse_sentence, split_sentences
 from parse.glossary import Glossary
@@ -92,6 +93,13 @@ class SentenceParserTests(unittest.TestCase):
         self.assertTrue(parsed.clauses)
         self.assertTrue(parsed.warnings)
 
+    def test_spacy_runtime_error_is_visible_in_warning(self):
+        with patch("parse.spacy_parser.parse_spacy", side_effect=RuntimeError("boom")):
+            with self.assertLogs("parse.clauser", level="ERROR"):
+                parsed = parse_sentence("The controller waits.")
+        self.assertEqual(parsed.engine, "rule-fallback")
+        self.assertIn("RuntimeError", parsed.warnings[0])
+
 
 class GlossaryTests(unittest.TestCase):
     def test_variant_and_user_override(self):
@@ -139,6 +147,17 @@ class ApiTests(unittest.TestCase):
         self.assertIn("grammar", result["clauses"][0])
         self.assertIn("segments", result["clauses"][0])
 
+    def test_uses_spacy_lemma_for_irregular_glossary_hit(self):
+        response = self.client.post(
+            "/api/analyze",
+            json={"sentences": ["The signal is driven by the controller."]},
+        )
+        self.assertEqual(response.status_code, 200)
+        terms = response.get_json()["results"][0]["terms"]
+        driven = next(term for term in terms if term["word"].lower() == "driven")
+        self.assertEqual(driven["zh"], "驱动")
+        self.assertTrue(driven["variant"])
+
     def test_rejects_invalid_sentences(self):
         response = self.client.post("/api/analyze", json={"sentences": "not-a-list"})
         self.assertEqual(response.status_code, 400)
@@ -146,6 +165,52 @@ class ApiTests(unittest.TestCase):
 
         response = self.client.post("/api/analyze", json=[])
         self.assertEqual(response.status_code, 400)
+
+        response = self.client.post("/api/analyze", json={"sentences": ["   "]})
+        self.assertEqual(response.status_code, 400)
+
+    def test_request_size_limit_and_security_headers(self):
+        response = self.client.post(
+            "/api/analyze",
+            data=b"x" * (server.MAX_REQUEST_BYTES + 1),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("不能超过", response.get_json()["error"])
+
+        index = self.client.get("/")
+        self.assertEqual(index.status_code, 200)
+        self.assertIn("default-src 'self'", index.headers["Content-Security-Policy"])
+        self.assertEqual(index.headers["X-Content-Type-Options"], "nosniff")
+        index.close()
+
+    def test_user_glossary_hot_reload_invalidates_cache(self):
+        old_path = server._glossary_path
+        old_glossary = server._glossary
+        old_signature = server._glossary_signature
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "glossary.json"
+                path.write_text(
+                    json.dumps({"latency": {"pos": "n.", "zh": "第一版", "note": ""}}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                server._glossary_path = path
+                server._glossary_signature = None
+                first = self.client.post("/api/analyze", json={"sentences": ["Latency matters."]})
+                self.assertEqual(first.get_json()["results"][0]["terms"][0]["zh"], "第一版")
+
+                path.write_text(
+                    json.dumps({"latency": {"pos": "n.", "zh": "更新后的第二版", "note": ""}}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                second = self.client.post("/api/analyze", json={"sentences": ["Latency matters."]})
+                self.assertEqual(second.get_json()["results"][0]["terms"][0]["zh"], "更新后的第二版")
+        finally:
+            server._glossary_path = old_path
+            server._glossary = old_glossary
+            server._glossary_signature = old_signature
+            server._analyze_sentence.cache_clear()
 
 
 if __name__ == "__main__":

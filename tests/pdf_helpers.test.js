@@ -5,8 +5,8 @@ const assert = require("node:assert/strict");
 
 function loadHelpers() {
   const context = { console, Promise, setTimeout, clearTimeout };
-  vm.runInNewContext(fs.readFileSync("static/pdf_ui_fixes.js", "utf8"), context);
-  return context.__parseSpecPdfUiFixes;
+  vm.runInNewContext(fs.readFileSync("static/pdf_helpers.js", "utf8"), context);
+  return context.__parseSpecPdfHelpers;
 }
 
 test("句子标记按真实词坐标覆盖每一行完整范围", () => {
@@ -35,11 +35,11 @@ test("PDF 目录支持命名目标和显式页引用", async () => {
   assert.equal(await resolveOutlinePage(pdf, "missing"), null);
 });
 
-test("页面加载顺序保证补丁在 viewer.js 之后生效", () => {
-  const html = fs.readFileSync("static/index.html", "utf8");
-  const viewer = html.indexOf('/static/viewer.js');
-  const fixes = html.indexOf('/static/pdf_ui_fixes.js');
-  assert.ok(viewer >= 0);
-  assert.ok(fixes > viewer);
-  assert.match(html, /pdf_ui_fixes\.css/);
+test("模块启动顺序保证辅助函数先于阅读器加载", () => {
+  const app = fs.readFileSync("static/app.js", "utf8");
+  const helpers = app.indexOf('/static/pdf_helpers.js');
+  const viewer = app.indexOf('/static/viewer.js');
+  assert.ok(helpers >= 0);
+  assert.ok(viewer > helpers);
+  assert.match(fs.readFileSync("static/index.html", "utf8"), /type="module" src="\/static\/app\.js"/);
 });

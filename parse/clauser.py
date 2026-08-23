@@ -4,7 +4,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import re
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -48,6 +52,7 @@ class ParsedSentence:
     main_clause_id: str = ""
     engine: str = "rule-fallback"
     warnings: list[str] = field(default_factory=list)
+    term_candidates: list[tuple[str, str]] = field(default_factory=list, repr=False)
 
 
 @dataclass(slots=True)
@@ -225,7 +230,7 @@ def _locate_chunks(source: str, chunks: list[Chunk]) -> list[tuple[Chunk, int, i
     return located
 
 
-def _fallback_parse(sentence: str) -> ParsedSentence:
+def _fallback_parse(sentence: str, reason: str = "spaCy 不可用，已使用规则降级解析") -> ParsedSentence:
     chunks = segment_clauses(sentence)
     located = _locate_chunks(sentence, chunks)
     main_parts = [(chunk, start, end) for chunk, start, end in located if chunk.kind == "main"]
@@ -293,7 +298,8 @@ def _fallback_parse(sentence: str) -> ParsedSentence:
         clauses=nodes,
         main_clause_id="c0",
         engine="rule-fallback",
-        warnings=["spaCy 不可用，已使用规则降级解析"],
+        warnings=[reason],
+        term_candidates=[(token, token.lower()) for token in re.findall(r"[A-Za-z]+(?:['-][A-Za-z]+)*", sentence)],
     )
 
 
@@ -303,15 +309,19 @@ def parse_sentence(text: str) -> ParsedSentence:
     if not sentence:
         return ParsedSentence("", [], warnings=["句子为空"])
     try:
-        from .spacy_parser import parse_spacy
+        from .spacy_parser import _SPACY_ERROR, parse_spacy
 
         parsed = parse_spacy(sentence)
         if parsed is not None and parsed.clauses:
             return parsed
-    except Exception:
-        # 离线模型缺失或解析异常时仍需返回可展示的同构数据。
-        pass
-    return _fallback_parse(sentence)
+        reason = "spaCy 模型不可用，已使用规则降级解析"
+        if _SPACY_ERROR:
+            LOGGER.warning("spaCy 初始化失败：%s", _SPACY_ERROR)
+    except Exception as exc:
+        # 保留降级可用性，同时让真正的解析缺陷在日志和响应中可观察。
+        LOGGER.exception("spaCy 解析异常，已降级到规则引擎")
+        reason = f"spaCy 解析异常（{type(exc).__name__}），已使用规则降级解析"
+    return _fallback_parse(sentence, reason)
 
 
 def _self_test() -> None:

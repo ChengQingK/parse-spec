@@ -7,12 +7,17 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "node --test tests/*.test.js"
+    "sync:pdfjs": "node scripts/sync_pdfjs.js",
+    "verify:pdfjs": "node scripts/sync_pdfjs.js --check",
+    "test": "npm run verify:pdfjs && node --test tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.13.0"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "dependencies": {
-    "pdfjs-dist": "^2.16.105"
+  "devDependencies": {
+    "pdfjs-dist": "6.2.108"
   }
 }

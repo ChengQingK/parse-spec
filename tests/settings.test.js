@@ -100,6 +100,7 @@ function loadViewer({ narrow = false, preset = null } = {}) {
     pdfjsLib: { GlobalWorkerOptions: {} },
     getComputedStyle: (el) => ({ getPropertyValue: (name) => el.style.getPropertyValue(name) }),
   };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'static', 'pdf_helpers.js'), 'utf8'), context);
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'static', 'viewer.js'), 'utf8'), context);
   return { context, els, storage, getFetchCount: () => fetchCount };
 }

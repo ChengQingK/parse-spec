@@ -1,9 +1,8 @@
 const fs = require("node:fs");
-const path = require("node:path");
 const vm = require("node:vm");
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const pdfjs = require("pdfjs-dist/legacy/build/pdf.js");
+const pdfjsPromise = import("pdfjs-dist/legacy/build/pdf.mjs");
 
 
 class FakeClassList {
@@ -142,7 +141,7 @@ function loadViewer(
     console,
     Map,
     Promise,
-    pdfjsLib: { GlobalWorkerOptions: {} },
+    pdfjsLib: { GlobalWorkerOptions: {}, ...(settings.pdfjsLib || {}) },
     document,
     window,
     fetch: fetchImpl,
@@ -150,6 +149,7 @@ function loadViewer(
     setTimeout,
     clearTimeout,
   };
+  vm.runInNewContext(fs.readFileSync("static/pdf_helpers.js", "utf8"), context);
   vm.runInNewContext(fs.readFileSync("static/viewer.js", "utf8"), context);
   return {
     context,
@@ -174,17 +174,103 @@ function wireSentence(context, pageNum, text) {
 
 test("示例 PDF 仍切分为 9 句", async () => {
   const { context } = loadViewer();
+  const pdfjs = await pdfjsPromise;
   const data = new Uint8Array(fs.readFileSync("docs/sample_spec.pdf"));
-  const standardFontDataUrl = path.join(
-    path.dirname(require.resolve("pdfjs-dist/package.json")),
-    "standard_fonts",
-  ) + path.sep;
-  const pdf = await pdfjs.getDocument({ data, standardFontDataUrl }).promise;
+  const pdf = await pdfjs.getDocument({ data, verbosity: 0 }).promise;
   const page = await pdf.getPage(1);
   const viewport = page.getViewport({ scale: 1.4 });
   const textContent = await page.getTextContent();
   const words = context.toWords(textContent.items, viewport, 1.4);
   assert.equal(context.buildSentences(words).length, 9);
+});
+
+
+test("同一文本 span 横跨两个句子时按指针坐标命中", () => {
+  const requested = [];
+  const { context } = loadViewer(async (_url, options) => {
+    const text = JSON.parse(options.body).sentences[0];
+    requested.push(text);
+    return responseFor(text);
+  });
+  const span = new FakeElement("First sentence. Second sentence.");
+  const layer = new FakeElement();
+  layer.spans = [span];
+  const wrap = new FakeElement();
+  const first = [{ text: "First sentence.", x0: 0, y0: 10, x1: 90, y1: 20 }];
+  const second = [{ text: "Second sentence.", x0: 100, y0: 10, x1: 200, y1: 20 }];
+  context.wireTextLayer(layer, wrap, [first, second], [...first, ...second], 1);
+
+  layer.emit("click", { clientX: 140, clientY: 15 });
+  assert.deepEqual(requested, ["Second sentence."]);
+});
+
+
+test("快速连续打开 PDF 时旧加载不能覆盖新文档", async () => {
+  const pending = [];
+  const destroyed = [];
+  const { context, elements } = loadViewer(undefined, {
+    pdfjsLib: {
+      getDocument: () => {
+        let resolve;
+        const promise = new Promise((done) => { resolve = done; });
+        const task = { promise, destroy: async () => { destroyed.push(task); } };
+        pending.push({ resolve, task });
+        return task;
+      },
+    },
+  });
+  const firstFile = { name: "first.pdf", arrayBuffer: async () => new ArrayBuffer(1) };
+  const secondFile = { name: "second.pdf", arrayBuffer: async () => new ArrayBuffer(1) };
+  const firstLoad = context.openPdf(firstFile);
+  await new Promise((resolve) => setImmediate(resolve));
+  const secondLoad = context.openPdf(secondFile);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const secondPdf = { numPages: 0, getOutline: async () => [], destroy: async () => {} };
+  pending[1].resolve(secondPdf);
+  await secondLoad;
+  const firstPdf = { numPages: 0, getOutline: async () => [], destroy: async () => { destroyed.push(firstPdf); } };
+  pending[0].resolve(firstPdf);
+  await firstLoad;
+
+  assert.match(elements["doc-meta"].textContent, /second\.pdf/);
+  assert.ok(destroyed.includes(firstPdf));
+  assert.ok(destroyed.includes(pending[0].task));
+});
+
+
+test("跨页未完句与下一页小写开头自动合并", () => {
+  const { context } = loadViewer();
+  const state = { nextId: 0, pending: null };
+  const firstPage = [[
+    { text: "The", x0: 0, y0: 10, x1: 20, y1: 20 },
+    { text: "control-", x0: 24, y0: 10, x1: 80, y1: 20 },
+  ]];
+  const secondPage = [[
+    { text: "ler", x0: 0, y0: 10, x1: 20, y1: 20 },
+    { text: "waits.", x0: 24, y0: 10, x1: 70, y1: 20 },
+  ]];
+  const firstTargets = context.createPageTargets(firstPage, 1, state);
+  const secondTargets = context.createPageTargets(secondPage, 2, state);
+
+  assert.equal(secondTargets[0], firstTargets[0]);
+  assert.equal(firstTargets[0].text, "The controller waits.");
+  assert.equal(firstTargets[0].endPageNum, 2);
+  assert.match(firstTargets[0].contextWarnings[0], /自动合并/);
+  assert.equal(state.pending, null);
+});
+
+
+test("多栏文本优先遵循 PDF 的原始阅读顺序", () => {
+  const { context } = loadViewer();
+  const words = [
+    { text: "Left one.", x0: 0, y0: 10, x1: 70, y1: 20, itemIndex: 0, hasEOL: true },
+    { text: "Left two.", x0: 0, y0: 30, x1: 70, y1: 40, itemIndex: 1, hasEOL: true },
+    { text: "Right one.", x0: 200, y0: 10, x1: 280, y1: 20, itemIndex: 2, hasEOL: true },
+    { text: "Right two.", x0: 200, y0: 30, x1: 280, y1: 40, itemIndex: 3, hasEOL: true },
+  ];
+  const texts = context.buildSentences(words).map((sentence) => sentence.map((word) => word.text).join(" "));
+  assert.deepEqual(JSON.parse(JSON.stringify(texts)), ["Left one.", "Left two.", "Right one.", "Right two."]);
 });
 
 

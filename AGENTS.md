@@ -8,10 +8,10 @@
 - 生成示例 PDF：`python make_sample.py` → 生成 `docs/sample_spec.pdf`
 - 初始化环境：`uv venv --python 3.11 .venv`，然后 `uv pip install --python .venv\Scripts\python.exe -r requirements.txt .\vendor\en_core_web_sm-3.8.0-py3-none-any.whl`
 - `server.py` 在直接运行且当前解释器缺 Flask 时，会自动切换到已有的项目 `.venv`；没有 `.venv` 则打印上述安装命令。
-- 完整自测：`python -m unittest discover -s tests -p "test_*.py" -v`、`npm test`
+- 完整自测：`.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v`、`npm test`
 - 模块冒烟：`python -m parse.clauser`、`python -m parse.glossary`
-- 环境：Python 3.11（`list[T]` 下标、`str | None` 联合类型）
-- 前端无构建步骤：`pdfjs-dist@2.x` 已 vendor 到 `static/pdf.min.js` 与 `static/pdf.worker.min.js`（与 `package.json` 中 `pdfjs-dist@^2.16.105` 一致，`node_modules/pdfjs-dist` SHA256 已验证相同）
+- 环境：Python 3.11；前端测试要求 Node.js ≥22.13。
+- 前端无构建步骤：`pdfjs-dist@6.2.108` 的模块版运行文件已 vendor 到 `static/pdf.min.mjs` 与 `static/pdf.worker.min.mjs`。升级后运行 `npm run sync:pdfjs`；`npm test` 会先做哈希一致性校验。
 
 ## 解析引擎：spaCy（本地离线）
 
@@ -19,7 +19,7 @@
 
 - 使用本地模型 **`en_core_web_sm`（3.8.0）**，wheel 保存在 `vendor/`，可完全离线安装和运行。
 - 模型**不在常用 PyPI 镜像上**，不要在初始化时重复下载；直接安装仓库中的 wheel（见 `requirements.txt` 头部注释）。
-- `parse/clauser.py` 保留原纯规则逻辑（`segment_clauses`/`structure`）作为**回退**：spaCy 或模型不可用时 `parse_sentence` 自动降级，保证功能不缺失。
+- `parse/clauser.py` 保留原纯规则逻辑（`segment_clauses`/`structure`）作为**回退**：spaCy 或模型不可用时 `parse_sentence` 自动降级；运行异常会写日志并在 `warnings` 中标明异常类型。
 - `parse/__init__.py` 中的旧铁律"禁止 spaCy"已随此替换废除，以本文件为准。
 
 ### spaCy 解析实现要点（`parse/spacy_parser.py`）
@@ -41,29 +41,30 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 
 ## 前端实现要点（`static/viewer.js` + `static/style.css`，2026-08 更新）
 
-### 渲染：canvas + 透明文本层（可复制/可选中 + 命中）
+### 渲染：canvas + 透明文本层 + 坐标标记层
 
-- `renderPage`：canvas 绘制正文后，用 `pdfjsLib.renderTextLayer({ textContent, container, viewport, textDivs: [] })` 生成**透明文本层**（`.textLayer`，CSS 中 `color: transparent`）。
-- 文本层同时承担**原生文本选择/复制**（`.textLayer ::selection` 高亮）与句子命中（每个 `span` 挂 `mouseenter/mouseleave/click`）。
+- `static/app.js` 依次加载模块版 PDF.js、`pdf_helpers.js` 和 `viewer.js`；`renderPage` 使用 PDF.js 6 的 `TextLayer` 类生成透明文本层。
+- 文本层保留原生文本选择/复制；`.sentence-mark-layer` 按真实词坐标绘制完整行级高亮，且 `pointer-events:none`，不会挡住选择。
 - 已废弃整页 `.hover-layer/.sent` 覆盖层（会挡住原生文本选择，是"无法复制"的根因），相关 CSS 已从 `style.css` 移除。
 
 ### 句子切分（`buildSentences` / `isSentenceEnd`）
 
-- `S = 1.4` 渲染倍率；`toWords` 用 `getTextContent().items` 重建词坐标，按 y 聚类成行（容差 `8*S`）、按 x 排序，再聚合成句子。
+- `S = 1.4` 渲染倍率；`toWords` 保留 `TextItem.itemIndex/hasEOL`。切句优先使用 PDF 原始阅读顺序（改善多栏），缺失原始序号时才按 y/x 坐标回退。
 - 切句启发式：句末标点之外，新增"行尾 + 与下一行垂直间距 > `fontSize*1.4` + 下一行大写开头"规则，用于标题/段间距（把 `Sample Bus Specification ...` 标题与正文行正确分开，示例 PDF 由误切 17 句变 9 句）。
-- 已知局限：启发式对多栏排版、表格、页眉页脚、跨页句子可能误判（见"评估"节）。
+- 跨页状态会在“上一页无句末标点、下一页小写或连接词续接”等保守条件下合并；跨页断词会去除页尾连字符，并在 UI 中提示复核。
 
 ### 命中映射（`wireTextLayer`）
 
-- **文本子串匹配优先**：把每行 `span` 文本归一化（去空白）后与 `pageSentTexts` 比对，一行文本是某句的连续子串且唯一命中即归属；把整句的多个 `span` 归入 `pageSentGroups`。
-- **坐标兜底**：短行命中多句时，用 `span.getBoundingClientRect()` 的 y 与重建词坐标的行号匹配。
-- 注意：textLayer `span` 顶部比 `convertToViewportPoint` 的 y0 高约 13px（基线偏移），**坐标匹配不可靠，文本匹配才是正解**。
+- 唯一文本子串仍用于把简单 span 直接归入句子；整页文本层同时用词坐标矩形做事件委托。
+- 当一个 span 横跨多个句子或文本匹配为零时，`mousemove/click` 按指针落点命中对应句子，避免整块失去交互。
+- 视觉高亮完全使用前端词坐标生成的标记层，不依赖 textLayer 约 13px 的字体基线偏移。
 
 ### 预览、选中与侧边栏交互
 
 - 悬停只设置 `.is-preview` 浅色高亮，**不请求后端**；单击后设置 `.is-selected` 并调用 `/api/analyze`，结果在右侧栏持久展示。
 - `previewTarget` 与 `selectedTarget` 分离；选中不会随鼠标移开消失。切换句子时移除旧选中类，请求序号阻止旧异步响应覆盖新结果。
-- 右栏默认 440px，可拖动为 340–620px 并保存到 `localStorage`；窄屏（≤760px）切换为底部抽屉。
+- 分析栏默认在右侧，支持左/右/上/下停靠或关闭，保存宽高与位置；窄屏按所选方向显示抽屉。
+- 设置提供浅色、暗色、护眼主题和简洁/标准/详细三档解析密度；顶栏目录按钮读取 PDF outline。
 - `Esc`、关闭按钮或顶栏收起会清除选中并关闭分析栏；拖选文字时 `hasTextSelection()` 抑制句子选择。
 - 树节点悬停时使用后端 `segments` 在右栏原句中精确标记对应片段；PDF 文本层仍保持整句高亮，避免破坏原生复制。
 
@@ -72,10 +73,10 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - `parse/clauser.py` → `parse_sentence(s: str) -> ParsedSentence(text, clauses, main_clause_id, engine, warnings)`。
   - `ClauseNode` 带 `parent_id/order/text/start/end/segments/kind/relation/label/marker/grammar/confidence/warnings`。
   - `Grammar` 带 `subject/predicate/object/agent/complement/voice/negated/modality`。
-  - `parse_sentence` 优先走 spaCy，不可用则返回同构的 `rule-fallback` 树。
+- `parse_sentence` 优先走 spaCy，不可用则返回同构的 `rule-fallback` 树；`term_candidates` 是仅供后端词典抽取使用的原词/lemma 对。
 - `parse/spacy_parser.py` → `parse_spacy(text) -> ParsedSentence | None`；模块级 `_SPACY_OK` 指示模型是否就绪。
 - `parse/glossary.py` → `Glossary.lookup(word) -> dict | None`；**未命中返回 `None`**（调用方应做"未收录"兜底）。
-  - `BUILTIN` 内置词典 + 可选用户词典 `glossary.json`（用户优先级高）；词形还原靠去后缀兜底，命中时带 `variant: true`。
+  - `BUILTIN` 内置词典 + 可选用户词典 `glossary.json`（用户优先级高）；服务按 mtime/大小自动热重载并清除旧分析缓存。
 
 ## API 契约（POST `/api/analyze`）
 
@@ -107,12 +108,15 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 
 ## 已知坑
 
-- `glossary.json`（用户自定义词典）**现位于项目根目录**，格式 `{ "word": { "pos": ..., "zh": ..., "note": ... } }`；该文件用户可自定义，启动时由 `server.py` 加载，内容优先级高于内置 `BUILTIN`。
-- 数据后端的词典命中的"复杂词"由正则 `[A-Za-z]+(?:['-][A-Za-z]+)*` 从句子中抽取，**粒度与 spaCy 分词不一致**（例：`clock.then` 会被当一个词，`don't` 整体命中但词形还原靠去后缀）。
-- 前端：坐标匹配受 ~13px 基线偏移影响不可靠（命中用文本子串匹配规避）；句子按"单页"切分，**跨页句子会被截成两段**。
+- `glossary.json` 位于项目根目录，格式 `{ "word": { "pos": ..., "zh": ..., "note": ... } }`；用户词条优先于 `BUILTIN`，保存后下一次请求自动重载。
+- spaCy 路径用 tokenizer 与 lemma 抽取术语；规则降级路径仍依赖正则候选和 `Glossary.lookup` 的轻量后缀还原。
+- 跨页合并是保守启发式：下一页以专有名词或大写缩写续接时可能只给出“疑似截断”提示；表格和 PDF 自身错误阅读顺序仍可能误切。
+- 页面仍会顺序完整渲染；每页间会让出事件循环且新文件会取消旧任务，但超大 PDF 尚未实现可见页虚拟化。
 
 ## 变更记录（2026-08）
 
+- 2026-08-23：全面优化——PDF.js 由存在安全公告的 2.x 升级到 6.2.108 模块版并加入同步/哈希校验；修复连续打开 PDF 的竞态和单 span 多句无法命中；目录由猴子补丁改为显式模块；增加跨页保守合并、多栏原始阅读顺序、词典热重载、lemma 术语、解析异常可观测性、请求体上限与安全响应头；同步中文 UI、文档和回归测试。
+- 2026-08-20：新增主题、三档解析密度、分析栏五种位置、完整句子坐标标记和 PDF 目录导航。
 - 2026-08-20：从内容悬浮窗重构为持久分析侧栏——悬停仅预览、单击解析并锁定；新增可拖动右栏/窄屏底部抽屉、逻辑分句树、逐分句 grammar、精确字符 segments、API schema v2、规则同构降级和对应回归测试。旧 tooltip 交互已删除。
 - 2026-08-19/20：前端交互四项修复（仅改 `static/viewer.js` / `static/style.css`，后端未动）——
   1. 断句：`Sample Bus Specification ...` 标题与 `The write data ...` 正文不再被合并成一个句子（`isSentenceEnd` 增行间距 + 大写启发式）。
@@ -135,20 +139,17 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 
 ### 当前缺陷 / 风险
 
-- **断句是启发式且有单页局限**：依赖"行间距 > 行高 1.4× + 下一行大写"判断标题/段首；对多栏、表格、页眉页脚、行首大写单词的折行易误判；句子按页切分，跨页长句会被硬拆成两段。
-- **命中映射对歧义文本敏感**：文本子串匹配在"同一行文本在多句中都出现"或"PDF 提取文本带连字符断词（hyphenation）"时会错配；坐标兜底本身受 ~13px 基线偏移影响，可靠性有限。
-- **术语抽取粒度不一致**：后端用正则而非 spaCy tokenize 抽"复杂词"，与前端/词典粒度脱节；`glossary.lookup` 的去后缀还原较粗（不处理不规则变体）。
-- **自动化覆盖仍有限**：已有 Python 解析/API 测试和 Node 前端回归测试，覆盖示例 9 句与多页状态隔离；真实浏览器文本选择、跨页句子、多栏/表格仍缺少自动化覆盖。
-- **模型边界**：`en_core_web_sm` 对某些高度歧义或省略结构会误标；关系为 `ambiguous` 时 UI 会提示，但置信度是启发式等级，不是统计校准值。
-- **性能**：单击才 POST，前端按句子缓存、后端有进程级 LRU；spaCy 对超长句仍是 CPU 密集，目前没有超时取消。
-- **运维面**：Flask 无鉴权，若误绑非 localhost 会暴露解析接口；`server.log` 记录了每次请求，长期运行需轮转（次要）。
+- **断句仍是启发式**：已使用 `TextItem` 原始顺序、`hasEOL`、段间距和跨页状态，但复杂表格、页眉页脚及 PDF 自身错误阅读顺序仍会误判。
+- **跨页规则偏保守**：能处理小写续接和跨页断词，但下一页以专有名词/大写缩写续接时不会自动合并，只会提示疑似截断。
+- **模型边界**：`en_core_web_sm` 对高度歧义或省略结构仍可能误标；`confidence` 是启发式等级，不是统计校准值。
+- **超大文档性能**：新文件可取消旧加载、每页间会让出事件循环，但 canvas 与文本层仍会完整保留，尚未做可见页虚拟化。
+- **解析超时**：spaCy 超长句仍是 CPU 密集任务，目前只有输入长度/请求体限制，没有进程级硬超时。
+- **真实浏览器自动化**：本轮已人工完成真实浏览器冒烟，但仓库测试仍以 Node 模拟 DOM 为主，尚未引入 Playwright 端到端套件。
 
 ### 建议的改进方向（按优先级）
 
-1. **扩充测试**：在现有 `tests/` 基础上补真实浏览器文本选择、跨页句子、缩写、引号、多从句、多栏和表格样例。
-2. **断句用真实行信息 + 后端判据**：优先利用 pdf.js `TextItem` 的 `hasEOL`/`transform` 判定行与段，必要时把"行尾句号是否真为句界"交给后端 spaCy `sentencizer` 二次确认，降低纯前端启发式误判。
-3. **支持跨页句子**：维护跨页缓存（上一页末尾未收尾的行带入下一页合并），或至少在侧边栏中提示"句子可能被分页截断"。
-4. **术语抽取对齐 spaCy**：用 `nlp.tokenizer` 输出替代正则，还原用 `token.lemma_`，统一词形与词典键；`glossary.lookup` 增加正则/不规则还原。
-5. **翻译与语料扩展**：在 `translation` 扩展点接入本地小模型；先锁定术语，再用本地平行语料检索增强，输出否定/情态/数值一致性警告。
-6. **性能**：为超长句增加超时/取消和清晰降级提示；必要时按可见页懒渲染 PDF。
-7. **测试扩展**：补真实浏览器文本选择、侧栏拖动、窄屏抽屉以及多栏/表格样例。
+1. **真实浏览器回归**：加入 Playwright 端到端测试，覆盖文件选择、复制、坐标点击、目录、侧栏拖动和窄屏布局。
+2. **超大 PDF 虚拟化**：只保留可见页附近的 canvas/textLayer，跨页文本状态与视觉渲染生命周期分离。
+3. **解析隔离与超时**：把 spaCy 调用放入可取消的工作进程，为超长句提供明确降级提示。
+4. **复杂版面语料**：补真实多栏、表格、页眉页脚和跨页大写续接 PDF，用样本驱动而非继续堆叠无数据启发式。
+5. **翻译与语料扩展**：在 `translation` 扩展点接入本地小模型；先锁定术语，再做否定、情态和数值一致性校验。

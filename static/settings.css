@@ -1,4 +1,4 @@
-/* Settings, themes, analysis depth and dockable analysis panel. Loaded after style.css. */
+/* 设置、主题、解析深度和可停靠分析栏；在 style.css 之后加载。 */
 :root {
   --panel-height: 340px;
   --ui-bg: #edf0f4;
@@ -60,7 +60,7 @@ html,body { background:var(--ui-bg); color:var(--ui-ink); }
 .retry-btn { background:var(--ui-panel); border-color:var(--ui-error-line); color:var(--ui-error-ink); }
 .skeleton-line { background:linear-gradient(90deg,var(--ui-muted-bg) 20%,var(--ui-soft) 45%,var(--ui-muted-bg) 70%); background-size:220% 100%; }
 
-/* Settings popover */
+/* 设置弹层 */
 .settings-wrap { position:relative; }
 .settings-popover { position:absolute; z-index:80; top:calc(100% + 12px); right:0; width:min(390px,calc(100vw - 24px)); padding:16px; border:1px solid var(--ui-line); border-radius:15px; background:var(--ui-panel); box-shadow:0 18px 50px var(--ui-shadow); }
 .settings-popover[hidden] { display:none; }
@@ -76,7 +76,7 @@ html,body { background:var(--ui-bg); color:var(--ui-ink); }
 .settings-reset { width:100%; margin-top:14px; padding:9px 12px; cursor:pointer; font-weight:650; }
 .settings-reset:hover { background:var(--ui-muted-bg); }
 
-/* Docking layout */
+/* 停靠布局 */
 .workspace { display:grid; overflow:hidden; transition:grid-template-columns .2s ease,grid-template-rows .2s ease; }
 .document-pane { grid-area:doc; min-width:0; min-height:0; }
 .panel-resizer { grid-area:resizer; }

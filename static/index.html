@@ -4,9 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Parse-Spec · 英文长难句解析</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/settings.css">
-<link rel="stylesheet" href="/static/pdf_ui_fixes.css">
+<link rel="stylesheet" href="/static/pdf_reader.css">
 </head>
 <body>
 <header class="topbar">
@@ -20,7 +21,7 @@
     <section class="settings-popover" id="settings-popover" aria-label="阅读与解析设置" hidden>
       <div class="settings-heading">
         <div>
-          <div class="eyebrow">Preferences</div>
+        <div class="eyebrow">阅读设置</div>
           <h2>设置</h2>
         </div>
         <button class="icon-btn settings-close" id="settings-close" type="button" aria-label="关闭设置">×</button>
@@ -54,6 +55,7 @@
       <button class="settings-reset" id="settings-reset" type="button">恢复默认设置</button>
     </section>
   </div>
+  <button class="icon-btn outline-toggle" id="outline-toggle" type="button" aria-expanded="false" aria-controls="outline-panel" aria-label="打开 PDF 目录">目录</button>
   <button class="icon-btn panel-toggle" id="panel-toggle" type="button" aria-expanded="true" aria-controls="analysis-panel">收起分析</button>
   <label class="btn filebtn">选择 PDF
     <input type="file" id="file" accept="application/pdf" hidden>
@@ -78,7 +80,7 @@
   <aside id="analysis-panel" class="analysis-panel" aria-label="句子分析栏">
     <header class="panel-header">
       <div>
-        <div class="eyebrow">Sentence analysis</div>
+        <div class="eyebrow">句子结构</div>
         <h2>句子分析</h2>
       </div>
       <button id="panel-close" class="icon-btn close-btn" type="button" aria-label="收起分析栏">×</button>
@@ -93,8 +95,14 @@
   </aside>
 </main>
 
-<script src="/static/pdf.min.js"></script>
-<script src="/static/viewer.js"></script>
-<script src="/static/pdf_ui_fixes.js"></script>
+<aside id="outline-panel" class="outline-panel" aria-label="PDF 目录" hidden>
+  <header class="outline-header">
+    <div><div class="eyebrow">文档导航</div><h2>目录</h2></div>
+    <button class="icon-btn outline-close" id="outline-close" type="button" aria-label="关闭目录">×</button>
+  </header>
+  <div class="outline-content" id="outline-content"><div class="outline-empty">打开 PDF 后读取目录…</div></div>
+</aside>
+
+<script type="module" src="/static/app.js"></script>
 </body>
 </html>

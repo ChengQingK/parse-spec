@@ -1,6 +1,11 @@
-/* Parse-Spec 前端：pdf.js 渲染、可复制文本层、句子选择、主题/解析程度设置与可停靠分析栏。 */
+/* Parse-Spec 前端：pdf.js 渲染、可复制文本层、句子选择、目录与可停靠分析栏。 */
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdf.worker.min.js";
+const pdfjsLib = globalThis.pdfjsLib;
+if (!pdfjsLib) throw new Error("PDF.js 尚未加载");
+const pdfHelpers = globalThis.__parseSpecPdfHelpers;
+if (!pdfHelpers) throw new Error("PDF 阅读辅助模块尚未加载");
+const { buildSentenceLineRects, resolveOutlinePage, targetAtPoint } = pdfHelpers;
+pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdf.worker.min.mjs";
 
 const S = 1.4;
 const fileInput = document.getElementById("file");
@@ -20,6 +25,10 @@ const themeSelect = document.getElementById("theme-select");
 const depthSelect = document.getElementById("depth-select");
 const positionSelect = document.getElementById("position-select");
 const settingsReset = document.getElementById("settings-reset");
+const outlineToggle = document.getElementById("outline-toggle");
+const outlinePanel = document.getElementById("outline-panel");
+const outlineClose = document.getElementById("outline-close");
+const outlineContent = document.getElementById("outline-content");
 
 const SETTINGS_KEY = "parse-spec:settings";
 const DEFAULT_SETTINGS = Object.freeze({ theme: "light", analysisDepth: "standard", panelPosition: "right" });
@@ -29,6 +38,8 @@ const VALID_POSITIONS = new Set(["left", "right", "top", "bottom", "off"]);
 const sentenceResults = new Map();
 
 let currentPdf = null;
+let activeLoadingTask = null;
+let documentLoadSerial = 0;
 let previewTarget = null;
 let selectedTarget = null;
 let requestSerial = 0;
@@ -140,7 +151,12 @@ function buildSentences(words) {
   }
   rows.sort((a, b) => a.y - b.y);
   for (const row of rows) row.items.sort((a, b) => a.x0 - b.x0);
-  const ordered = rows.flatMap((row) => row.items);
+  // pdf.js 的 TextItem 顺序通常保留文档阅读顺序，对多栏比单纯按 y/x 排序可靠。
+  // 缺少 itemIndex 的手工/旧数据才回退到视觉坐标顺序。
+  const hasSourceOrder = words.every((word) => Number.isInteger(word.itemIndex));
+  const ordered = hasSourceOrder
+    ? words.map((word, index) => ({ word, index })).sort((a, b) => a.word.itemIndex - b.word.itemIndex || a.index - b.index).map((item) => item.word)
+    : rows.flatMap((row) => row.items);
 
   const sentences = [];
   let current = [];
@@ -148,7 +164,7 @@ function buildSentences(words) {
     const word = ordered[index];
     const next = ordered[index + 1];
     current.push(word);
-    const newRow = !!(next && Math.abs(next.y0 - word.y0) >= rowTol);
+    const newRow = !!(next && (word.hasEOL || Math.abs(next.y0 - word.y0) >= rowTol));
     const fontSize = Math.max(8, word.y1 - word.y0);
     if (isSentenceEnd(word, next, fontSize, newRow)) {
       sentences.push(current);
@@ -161,7 +177,8 @@ function buildSentences(words) {
 
 function toWords(items, viewport, scale) {
   const words = [];
-  for (const item of items) {
+  for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+    const item = items[itemIndex];
     const raw = String(item.str || "").trim();
     if (!raw) continue;
     const transform = item.transform || [1, 0, 0, 1, 0, 0];
@@ -171,9 +188,18 @@ function toWords(items, viewport, scale) {
     const parts = raw.split(/\s+/).filter(Boolean);
     const totalChars = Math.max(1, parts.reduce((sum, part) => sum + part.length, 0));
     let cursorX = point[0];
-    for (const part of parts) {
+    for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+      const part = parts[partIndex];
       const partWidth = itemWidth * (part.length / totalChars);
-      words.push({ text: part, x0: cursorX, y0: point[1] - fontSize, x1: cursorX + partWidth, y1: point[1] });
+      words.push({
+        text: part,
+        x0: cursorX,
+        y0: point[1] - fontSize,
+        x1: cursorX + partWidth,
+        y1: point[1],
+        itemIndex,
+        hasEOL: !!item.hasEOL && partIndex === parts.length - 1,
+      });
       cursorX += partWidth + (parts.length > 1 ? itemWidth * .02 : 0);
     }
   }
@@ -182,7 +208,7 @@ function toWords(items, viewport, scale) {
 
 /* ---------------- PDF 页面 ---------------- */
 
-async function renderPage(pdf, pageNum, container) {
+async function renderPage(pdf, pageNum, container, documentSentenceState = null) {
   const page = await pdf.getPage(pageNum);
   const viewport = page.getViewport({ scale: S });
   const wrap = document.createElement("div");
@@ -199,19 +225,132 @@ async function renderPage(pdf, pageNum, container) {
   const textContent = await page.getTextContent();
   const words = toWords(textContent.items, viewport, S);
   const sentences = buildSentences(words);
+  const sentenceTargets = documentSentenceState
+    ? createPageTargets(sentences, pageNum, documentSentenceState)
+    : null;
 
   const textLayer = document.createElement("div");
   textLayer.className = "textLayer";
   textLayer.style.width = `${canvas.width}px`;
   textLayer.style.height = `${canvas.height}px`;
   wrap.appendChild(textLayer);
-  await pdfjsLib.renderTextLayer({ textContent, container: textLayer, viewport, textDivs: [] }).promise;
+  let textDivs = [];
+  if (typeof pdfjsLib.TextLayer === "function") {
+    const textLayerTask = new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport });
+    await textLayerTask.render();
+    textDivs = textLayerTask.textDivs || [];
+  } else {
+    textDivs = [];
+    await pdfjsLib.renderTextLayer({ textContent, container: textLayer, viewport, textDivs }).promise;
+  }
   textLayer.style.visibility = "visible";
-  wireTextLayer(textLayer, wrap, sentences, words, pageNum);
+  wireTextLayer(textLayer, wrap, sentences, words, pageNum, textDivs, sentenceTargets);
+  if (typeof page.cleanup === "function") page.cleanup();
   console.log(`P${pageNum}: ${words.length} 词, ${sentences.length} 句`);
 }
 
-function wireTextLayer(textLayer, wrap, sentences, words, pageNum) {
+function yieldToBrowser() {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
+    else setTimeout(resolve, 0);
+  });
+}
+
+function createSentenceMarks(wrap, targets) {
+  const oldLayer = wrap.querySelector && wrap.querySelector(".sentence-mark-layer");
+  if (oldLayer && oldLayer.remove) oldLayer.remove();
+  const layer = document.createElement("div");
+  layer.className = "sentence-mark-layer";
+  layer.setAttribute("aria-hidden", "true");
+  for (const target of targets) {
+    for (const rect of target.rects) {
+      const mark = document.createElement("span");
+      mark.className = "sentence-mark";
+      mark.dataset.pageNumber = String(target.pageNum);
+      mark.dataset.sentId = String(target.sentenceIndex);
+      mark.style.left = `${rect.left}px`;
+      mark.style.top = `${rect.top}px`;
+      mark.style.width = `${rect.width}px`;
+      mark.style.height = `${rect.height}px`;
+      layer.appendChild(mark);
+    }
+  }
+  wrap.appendChild(layer);
+}
+
+function sentenceText(sentence) {
+  return (sentence || []).map((word) => word.text).join(" ").trim();
+}
+
+function hasTerminalPunctuation(sentence) {
+  const text = sentenceText(sentence);
+  return /[.!?]["')\]]*$/.test(text);
+}
+
+function shouldMergeAcrossPages(previousSentence, nextSentence) {
+  if (!previousSentence || !nextSentence || hasTerminalPunctuation(previousSentence)) return false;
+  const previousText = sentenceText(previousSentence);
+  const first = nextSentence[0] && nextSentence[0].text;
+  if (!first) return false;
+  if (/-$/.test(previousText)) return /^[a-z]/.test(first);
+  return /^[a-z,;:)\]]/.test(first)
+    || /^(?:and|or|but|because|which|that|when|where|while|if|unless|until|to)$/i.test(first);
+}
+
+function joinAcrossPages(previousText, nextText) {
+  if (/-$/.test(previousText) && /^[a-z]/.test(nextText)) return `${previousText.slice(0, -1)}${nextText}`;
+  return `${previousText} ${nextText}`.replace(/\s+/g, " ").trim();
+}
+
+function createPageTargets(sentences, pageNum, state) {
+  const targets = [];
+  let startIndex = 0;
+  if (state.pending && sentences.length) {
+    if (shouldMergeAcrossPages(state.pending.sentence, sentences[0])) {
+      const target = state.pending.target;
+      const previousText = target.text;
+      target.text = joinAcrossPages(previousText, sentenceText(sentences[0]));
+      target.endPageNum = pageNum;
+      target.contextWarnings = ["该句由相邻两页自动合并，请结合分页处原文确认。"];
+      sentenceResults.delete(previousText);
+      targets.push(target);
+      startIndex = 1;
+    } else {
+      state.pending.target.contextWarnings = ["该句位于页尾且没有明确句末标点，可能被分页截断。"];
+    }
+  }
+  for (let sentenceIndex = startIndex; sentenceIndex < sentences.length; sentenceIndex++) {
+    targets[sentenceIndex] = {
+      key: `doc:${state.nextId++}`,
+      pageNum,
+      endPageNum: pageNum,
+      sentenceIndex,
+      text: sentenceText(sentences[sentenceIndex]),
+      spans: [],
+      locations: [],
+      contextWarnings: [],
+    };
+  }
+  if (sentences.length) {
+    const lastIndex = sentences.length - 1;
+    const lastTarget = targets[lastIndex];
+    state.pending = hasTerminalPunctuation(sentences[lastIndex])
+      ? null
+      : { target: lastTarget, sentence: sentences[lastIndex] };
+  }
+  return targets;
+}
+
+function finalizeDocumentSentences(state) {
+  if (state && state.pending && state.pending.target) {
+    const target = state.pending.target;
+    if (!(target.contextWarnings || []).length) {
+      target.contextWarnings = ["文档末尾没有明确句末标点，请确认句子是否完整。"];
+    }
+  }
+}
+
+function wireTextLayer(textLayer, wrap, sentences, words, pageNum, renderedTextDivs = [], providedTargets = null) {
   const rowTol = 8 * S;
   const rows = [];
   for (const word of words) {
@@ -238,13 +377,39 @@ function wireTextLayer(textLayer, wrap, sentences, words, pageNum) {
     }
   });
 
-  const sentenceTexts = sentences.map((sentence) => sentence.map((word) => word.text).join(" ").trim());
-  const sentenceGroups = new Map();
+  const sentenceTexts = sentences.map(sentenceText);
+  const analysisTargets = sentences.map((sentence, sentenceIndex) => (
+    providedTargets && providedTargets[sentenceIndex]
+      ? providedTargets[sentenceIndex]
+      : {
+          key: `${pageNum}:${sentenceIndex}`,
+          pageNum,
+          endPageNum: pageNum,
+          sentenceIndex,
+          text: sentenceTexts[sentenceIndex],
+          spans: [],
+          locations: [],
+          contextWarnings: [],
+        }
+  ));
+  const targets = analysisTargets.map((analysisTarget, sentenceIndex) => {
+    if (!analysisTarget.locations.some((location) => location.pageNum === pageNum && location.sentenceIndex === sentenceIndex)) {
+      analysisTarget.locations.push({ pageNum, sentenceIndex });
+    }
+    return {
+      analysisTarget,
+      pageNum,
+      sentenceIndex,
+      rects: buildSentenceLineRects(sentences[sentenceIndex], rowTol),
+    };
+  });
+  const sentenceGroups = new Map(analysisTargets.map((target, sentenceIndex) => [sentenceIndex, target.spans]));
   const wrapRect = wrap.getBoundingClientRect();
   const normalize = (value) => String(value).replace(/\s+/g, " ").trim();
   const normalizedSentences = sentenceTexts.map(normalize);
 
-  for (const span of textLayer.querySelectorAll("span")) {
+  const textSpans = renderedTextDivs.length ? renderedTextDivs : Array.from(textLayer.querySelectorAll("span"));
+  for (const span of textSpans) {
     if (span.classList.contains("endOfContent") || !span.textContent.trim()) continue;
     const spanText = normalize(span.textContent);
     if (spanText.length < 2) continue;
@@ -273,16 +438,37 @@ function wireTextLayer(textLayer, wrap, sentences, words, pageNum) {
   }
 
   for (const [sentenceIndex, spans] of sentenceGroups) {
-    const target = { key: `${pageNum}:${sentenceIndex}`, pageNum, sentenceIndex, text: sentenceTexts[sentenceIndex], spans };
+    const target = analysisTargets[sentenceIndex];
     for (const span of spans) {
       span.addEventListener("mouseenter", () => setPreview(target));
       span.addEventListener("mouseleave", () => clearPreview(target));
-      span.addEventListener("click", () => {
+      span.addEventListener("click", (event) => {
         if (hasTextSelection()) return;
+        event.__parseSpecSentenceHandled = true;
         selectSentence(target);
       });
     }
   }
+
+  const eventTarget = (event) => {
+    const rect = wrap.getBoundingClientRect ? wrap.getBoundingClientRect() : wrapRect;
+    const localTarget = targetAtPoint(targets, Number(event.clientX) - rect.left, Number(event.clientY) - rect.top);
+    return localTarget ? localTarget.analysisTarget : null;
+  };
+  textLayer.addEventListener("mousemove", (event) => {
+    if (hasTextSelection()) return;
+    const target = eventTarget(event);
+    if (target) setPreview(target);
+    else clearPreview();
+  });
+  textLayer.addEventListener("mouseleave", () => clearPreview());
+  textLayer.addEventListener("click", (event) => {
+    if (event.__parseSpecSentenceHandled || hasTextSelection()) return;
+    const target = eventTarget(event);
+    if (target) selectSentence(target);
+  });
+  createSentenceMarks(wrap, targets);
+  return targets;
 }
 
 /* ---------------- 预览与选中状态 ---------------- */
@@ -294,11 +480,116 @@ function hasTextSelection() {
 function addClassToSpans(target, className) {
   if (!target || !target.spans) return;
   for (const span of target.spans) span.classList.add(className);
+  toggleSentenceMarks(target, className, true);
 }
 
 function removeClassFromSpans(target, className) {
   if (!target || !target.spans) return;
   for (const span of target.spans) span.classList.remove(className);
+  toggleSentenceMarks(target, className, false);
+}
+
+function toggleSentenceMarks(target, className, enabled) {
+  if (!target || !document.querySelectorAll) return;
+  const locations = target.locations && target.locations.length
+    ? target.locations
+    : [{ pageNum: target.pageNum, sentenceIndex: target.sentenceIndex }];
+  for (const location of locations) {
+    const selector = `.sentence-mark[data-page-number="${Number(location.pageNum)}"][data-sent-id="${Number(location.sentenceIndex)}"]`;
+    for (const mark of document.querySelectorAll(selector)) mark.classList.toggle(className, enabled);
+  }
+}
+
+/* ---------------- PDF 目录 ---------------- */
+
+function setOutlineOpen(open) {
+  if (!outlinePanel || !outlineToggle) return;
+  outlinePanel.hidden = !open;
+  outlineToggle.setAttribute("aria-expanded", String(open));
+}
+
+function setOutlineStatus(message) {
+  if (outlineContent) outlineContent.innerHTML = `<div class="outline-empty">${esc(message)}</div>`;
+}
+
+function scrollToPage(pageNum) {
+  if (!Number.isInteger(pageNum) || pageNum < 1 || !document.querySelector) return false;
+  const pageElement = document.querySelector(`.page-wrap[data-page-number="${pageNum}"]`);
+  if (!pageElement) return false;
+  if (pageElement.scrollIntoView) pageElement.scrollIntoView({ behavior: "smooth", block: "start" });
+  pageElement.classList.add("outline-target-page");
+  setTimeout(() => pageElement.classList.remove("outline-target-page"), 1100);
+  return true;
+}
+
+async function navigateOutlineItem(pdf, item, button) {
+  if (!item) return;
+  if (item.dest) {
+    const pageNum = await resolveOutlinePage(pdf, item.dest);
+    if (pageNum && scrollToPage(pageNum)) {
+      if (outlinePanel && outlinePanel.querySelectorAll) {
+        for (const node of outlinePanel.querySelectorAll(".outline-item.is-active")) node.classList.remove("is-active");
+      }
+      if (button) button.classList.add("is-active");
+      setOutlineOpen(false);
+      return;
+    }
+  }
+  if (item.url && window.open) {
+    try {
+      const externalUrl = new URL(item.url, window.location && window.location.href);
+      if (["http:", "https:"].includes(externalUrl.protocol)) {
+        window.open(externalUrl.href, "_blank", "noopener,noreferrer");
+      } else {
+        setOutlineStatus("该目录链接使用了不受支持的协议，已阻止打开。");
+      }
+    } catch (_ignored) {
+      setOutlineStatus("该目录链接无效，无法打开。");
+    }
+  }
+}
+
+function appendOutlineItems(listElement, items, pdf) {
+  for (const item of items || []) {
+    const li = document.createElement("li");
+    li.className = "outline-node";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "outline-item";
+    button.textContent = String(item.title || "未命名条目").trim() || "未命名条目";
+    button.title = button.textContent;
+    button.addEventListener("click", () => navigateOutlineItem(pdf, item, button));
+    li.appendChild(button);
+    if (Array.isArray(item.items) && item.items.length) {
+      const children = document.createElement("ol");
+      children.className = "outline-list outline-list-nested";
+      appendOutlineItems(children, item.items, pdf);
+      li.appendChild(children);
+    }
+    listElement.appendChild(li);
+  }
+}
+
+async function loadPdfOutline(pdf, loadId = documentLoadSerial) {
+  if (!outlineContent || !pdf || typeof pdf.getOutline !== "function") return;
+  setOutlineStatus("正在读取目录…");
+  try {
+    const outline = await pdf.getOutline();
+    if (loadId !== documentLoadSerial || pdf !== currentPdf) return;
+    outlineContent.innerHTML = "";
+    if (!Array.isArray(outline) || !outline.length) {
+      setOutlineStatus("此 PDF 未提供可用目录（书签）。");
+      if (outlineToggle) outlineToggle.setAttribute("aria-label", "PDF 未提供目录");
+      return;
+    }
+    if (outlineToggle) outlineToggle.setAttribute("aria-label", `打开 PDF 目录，共 ${outline.length} 个顶级条目`);
+    const list = document.createElement("ol");
+    list.className = "outline-list";
+    appendOutlineItems(list, outline, pdf);
+    outlineContent.appendChild(list);
+  } catch (error) {
+    if (loadId === documentLoadSerial && pdf === currentPdf) setOutlineStatus(`目录读取失败：${String(error)}`);
+  }
 }
 
 function setPreview(target) {
@@ -392,8 +683,15 @@ function renderEmptyPanel() {
   </div>`;
 }
 
+function targetLocationText(target) {
+  const startPage = Number(target.pageNum);
+  const endPage = Number(target.endPageNum || startPage);
+  if (endPage > startPage) return `第 ${startPage}–${endPage} 页 · 跨页句子`;
+  return `第 ${startPage} 页 · 句子 ${Number(target.sentenceIndex) + 1}`;
+}
+
 function renderLoadingPanel(target) {
-  analysisContent.innerHTML = `<div class="sentence-meta"><span>第 ${target.pageNum} 页 · 句子 ${target.sentenceIndex + 1}</span></div>
+  analysisContent.innerHTML = `<div class="sentence-meta"><span>${targetLocationText(target)}</span></div>
     <div class="source-card"><p class="source-text">${esc(target.text)}</p></div>
     <div class="loading-panel" aria-label="解析中">
       <div class="loading-label">正在构建逻辑结构…</div>
@@ -404,7 +702,7 @@ function renderLoadingPanel(target) {
 }
 
 function renderErrorPanel(target, error) {
-  analysisContent.innerHTML = `<div class="sentence-meta"><span>第 ${target.pageNum} 页 · 句子 ${target.sentenceIndex + 1}</span></div>
+  analysisContent.innerHTML = `<div class="sentence-meta"><span>${targetLocationText(target)}</span></div>
     <div class="source-card"><p class="source-text">${esc(target.text)}</p></div>
     <div class="error-card">解析失败：${esc(String(error && error.message ? error.message : error))}
       <br><button class="retry-btn" id="retry-analysis" type="button">重新解析</button>
@@ -514,14 +812,16 @@ function renderAnalysisPanel(target, result) {
         ${detailed && term.note ? `<span class="term-note">${esc(term.note)}</span>` : ""}
       </li>`).join("")}</ul>`
     : `<div class="empty-copy">本句没有命中已收录术语</div>`;
-  const globalWarnings = detailed ? (result.warnings || []).map((warning) => `<div class="global-warning">${esc(warning)}</div>`).join("") : "";
+  const parserWarnings = detailed ? (result.warnings || []) : [];
+  const globalWarnings = [...(target.contextWarnings || []), ...parserWarnings]
+    .map((warning) => `<div class="global-warning">${esc(warning)}</div>`).join("");
   const engineName = result.engine === "spacy" ? "spaCy 本地解析" : "规则降级解析";
   const logicSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">逻辑结构</h3><ol class="logic-tree">${treeHtml}</ol></section>`;
   const termsSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">复杂词 / 术语</h3>${termsHtml}</section>`;
   const conciseCore = concise ? `<section class="analysis-section concise-core"><h3 class="section-heading">核心命题</h3><div class="core-card">${esc(main.text)}</div></section>` : "";
 
   analysisContent.innerHTML = `<div class="sentence-meta">
-      <span>第 ${target.pageNum} 页 · 句子 ${target.sentenceIndex + 1}</span>
+      <span>${targetLocationText(target)}</span>
       <span class="meta-badges"><span class="depth-badge">${depthText(depth)}</span><span class="engine-badge">${engineName}</span></span>
     </div>
     <div class="source-card"><p class="source-text" id="panel-source-text">${esc(result.text || target.text)}</p></div>
@@ -703,7 +1003,8 @@ window.addEventListener("pointermove", moveResize);
 window.addEventListener("pointerup", endResize);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    if (settingsPopover && !settingsPopover.hidden) closeSettings();
+    if (outlinePanel && !outlinePanel.hidden) setOutlineOpen(false);
+    else if (settingsPopover && !settingsPopover.hidden) closeSettings();
     else if (selectedTarget || (!panelCollapsed && panelPosition !== "off")) closeAnalysisPanel();
   }
 });
@@ -714,7 +1015,14 @@ if (themeSelect) themeSelect.addEventListener("change", (event) => setTheme(even
 if (depthSelect) depthSelect.addEventListener("change", (event) => setAnalysisDepth(event.target.value));
 if (positionSelect) positionSelect.addEventListener("change", (event) => setPanelPosition(event.target.value));
 if (settingsReset) settingsReset.addEventListener("click", resetSettings);
+if (outlineToggle) outlineToggle.addEventListener("click", (event) => {
+  if (event.stopPropagation) event.stopPropagation();
+  setOutlineOpen(!outlinePanel || outlinePanel.hidden);
+});
+if (outlineClose) outlineClose.addEventListener("click", () => setOutlineOpen(false));
 document.addEventListener("click", (event) => {
+  if (outlinePanel && !outlinePanel.hidden && outlineToggle
+      && !outlinePanel.contains(event.target) && !outlineToggle.contains(event.target)) setOutlineOpen(false);
   if (!settingsPopover || settingsPopover.hidden || !settingsToggle) return;
   if (settingsPopover.contains(event.target) || settingsToggle.contains(event.target)) return;
   closeSettings();
@@ -724,22 +1032,49 @@ document.addEventListener("click", (event) => {
 
 async function openPdf(file) {
   if (!file) return;
+  const loadId = ++documentLoadSerial;
+  if (activeLoadingTask && typeof activeLoadingTask.destroy === "function") {
+    Promise.resolve(activeLoadingTask.destroy()).catch(() => {});
+  }
+  if (currentPdf && typeof currentPdf.destroy === "function") {
+    Promise.resolve(currentPdf.destroy()).catch(() => {});
+  }
+  activeLoadingTask = null;
+  currentPdf = null;
   pagesEl.innerHTML = "";
   placeholder.hidden = true;
   sentenceResults.clear();
   clearPreview();
   clearSelection();
   setPanelCollapsed(panelPosition === "off" || isNarrowViewport());
+  setOutlineOpen(false);
+  setOutlineStatus("正在读取 PDF…");
   docMeta.textContent = `${file.name} · 加载中`;
   try {
     const data = await file.arrayBuffer();
-    currentPdf = await pdfjsLib.getDocument({ data }).promise;
-    for (let pageNum = 1; pageNum <= currentPdf.numPages; pageNum++) {
-      await renderPage(currentPdf, pageNum, pagesEl);
-      docMeta.textContent = `${file.name} · ${pageNum}/${currentPdf.numPages} 页`;
+    if (loadId !== documentLoadSerial) return;
+    const loadingTask = pdfjsLib.getDocument({ data, isEvalSupported: false });
+    activeLoadingTask = loadingTask;
+    const pdf = await loadingTask.promise;
+    if (loadId !== documentLoadSerial) {
+      if (typeof pdf.destroy === "function") await pdf.destroy();
+      return;
     }
-    docMeta.textContent = `${file.name} · ${currentPdf.numPages} 页`;
+    activeLoadingTask = null;
+    currentPdf = pdf;
+    const documentSentenceState = { nextId: 0, pending: null };
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      await renderPage(pdf, pageNum, pagesEl, documentSentenceState);
+      if (loadId !== documentLoadSerial || pdf !== currentPdf) return;
+      docMeta.textContent = `${file.name} · ${pageNum}/${pdf.numPages} 页`;
+      if (pageNum < pdf.numPages) await yieldToBrowser();
+    }
+    finalizeDocumentSentences(documentSentenceState);
+    docMeta.textContent = `${file.name} · ${pdf.numPages} 页`;
+    await loadPdfOutline(pdf, loadId);
   } catch (error) {
+    if (loadId !== documentLoadSerial) return;
+    activeLoadingTask = null;
     currentPdf = null;
     placeholder.hidden = false;
     placeholder.innerHTML = `<span class="placeholder-mark">!</span><h1>PDF 加载失败</h1><p>${esc(String(error))}</p>`;

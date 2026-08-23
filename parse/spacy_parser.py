@@ -14,9 +14,11 @@ try:
 
     _NLP = spacy.load("en_core_web_sm", disable=["ner"])
     _SPACY_OK = True
-except Exception:
+    _SPACY_ERROR = ""
+except Exception as exc:
     _NLP = None
     _SPACY_OK = False
+    _SPACY_ERROR = f"{type(exc).__name__}: {exc}"
 
 
 _CLAUSE_DEPS = {"relcl", "advcl", "ccomp", "xcomp", "csubj", "acl"}
@@ -415,4 +417,9 @@ def parse_spacy(text: str) -> ParsedSentence | None:
         clauses=nodes,
         main_clause_id="c0",
         engine="spacy",
+        term_candidates=[
+            (token.text, token.lemma_.lower())
+            for token in doc
+            if token.is_alpha and not token.is_space
+        ],
     )
