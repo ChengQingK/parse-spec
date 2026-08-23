@@ -45,6 +45,24 @@ test("字符级 DOM Range 不把同一 TextItem 的相邻句子一起高亮", ()
   assert.equal(targetAtPoint([{ id: "first", rects: firstRects }, { id: "second", rects: secondRects }], 100, 15).id, "second");
 });
 
+test("页面缩放后 DOM 字符矩形会还原为页面坐标，避免句子命中错位", () => {
+  const { buildSentenceDomRects, targetAtPoint } = loadHelpers();
+  const node = { textContent: "First sentence. Second sentence." };
+  const span = { firstChild: node };
+  let start = 0;
+  let end = 0;
+  const rangeFactory = () => ({
+    setStart: (_node, value) => { start = value; },
+    setEnd: (_node, value) => { end = value; },
+    getClientRects: () => [{ left: 20 + start * 5.5, top: 42, right: 20 + end * 5.5, bottom: 55.2 }],
+    detach() {},
+  });
+  const second = [{ itemIndex: 0, charStart: 16, charEnd: 32 }];
+  const rects = buildSentenceDomRects(second, [span], { left: 20, top: 20 }, 300, 100, rangeFactory, 1.1);
+  assert.deepEqual(JSON.parse(JSON.stringify(rects)), [{ left: 80, top: 20, width: 80, height: 12 }]);
+  assert.equal(targetAtPoint([{ id: "second", rects }], 100, 25).id, "second");
+});
+
 test("PDF 目录支持命名目标和显式页引用", async () => {
   const { resolveOutlinePage, resolvePdfDestination } = loadHelpers();
   const pdf = {

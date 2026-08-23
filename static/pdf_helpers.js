@@ -52,7 +52,7 @@
     return merged;
   }
 
-  function buildSentenceDomRects(sentence, textDivs, wrapRect, pageWidth, pageHeight, rangeFactory = null) {
+  function buildSentenceDomRects(sentence, textDivs, wrapRect, pageWidth, pageHeight, rangeFactory = null, visualScale = 1) {
     if (!sentence || !sentence.length || !textDivs || !textDivs.length || !wrapRect) return [];
     const rangesByItem = new Map();
     for (const word of sentence) {
@@ -71,6 +71,7 @@
     if (!createRange) return [];
 
     const rects = [];
+    const scale = Number.isFinite(Number(visualScale)) && Number(visualScale) > 0 ? Number(visualScale) : 1;
     for (const [itemIndex, offsets] of rangesByItem) {
       const span = textDivs[itemIndex];
       const node = span && span.firstChild;
@@ -85,10 +86,12 @@
         range.setStart(node, start);
         range.setEnd(node, end);
         for (const clientRect of range.getClientRects()) {
-          const left = Math.max(0, clientRect.left - wrapRect.left);
-          const top = Math.max(0, clientRect.top - wrapRect.top);
-          const right = Math.min(pageWidth, clientRect.right - wrapRect.left);
-          const bottom = Math.min(pageHeight, clientRect.bottom - wrapRect.top);
+          // DOMRect 是缩放后的视口坐标；标记层样式需要页面自身的未缩放坐标。
+          // 若直接把前者写回已缩放页面，会产生二次缩放，导致点击句子后仍保留旧分析结果。
+          const left = Math.max(0, (clientRect.left - wrapRect.left) / scale);
+          const top = Math.max(0, (clientRect.top - wrapRect.top) / scale);
+          const right = Math.min(pageWidth, (clientRect.right - wrapRect.left) / scale);
+          const bottom = Math.min(pageHeight, (clientRect.bottom - wrapRect.top) / scale);
           if (right > left && bottom > top) rects.push({ left, top, width: right - left, height: bottom - top });
         }
       } catch (_ignored) {

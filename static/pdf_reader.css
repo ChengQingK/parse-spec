@@ -115,34 +115,51 @@
 
 .bookmark-actions { padding: 12px 14px; border-bottom: 1px solid var(--line); }
 .bookmark-actions p { margin: 8px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
-.bookmark-add { width: 100%; padding: 8px 12px; }
-.bookmark-item { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 6px; margin: 2px 0; }
+.bookmark-create { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 7px; }
+.bookmark-create input { min-width: 0; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); color: var(--ink); font: inherit; font-size: 12px; }
+.bookmark-add { padding: 8px 12px; }
+.bookmark-item { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 4px; margin: 2px 0; }
 .bookmark-jump { min-width: 0; }
 .bookmark-jump strong,.bookmark-jump small { display: block; }
 .bookmark-jump small { margin-top: 3px; color: var(--muted); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bookmark-remove { align-self: center; border: 0; border-radius: 7px; padding: 6px 8px; background: transparent; color: var(--muted); cursor: pointer; }
+.bookmark-rename,.bookmark-remove { align-self: center; border: 0; border-radius: 7px; padding: 6px 8px; background: transparent; color: var(--muted); cursor: pointer; }
+.bookmark-rename:hover { background: var(--accent-soft); color: var(--accent-strong); }
 .bookmark-remove:hover { background: #feecec; color: #b42318; }
 
 /* 可搜索、可维护的本地术语表。 */
 .glossary-dialog { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(15,23,42,.42); }
 .glossary-dialog[hidden] { display: none; }
-.glossary-shell { width: min(920px, 96vw); max-height: min(760px, 92vh); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 18px; background: var(--panel); box-shadow: 0 24px 70px rgba(15,23,42,.28); }
+.glossary-shell { width: min(980px, 96vw); height: min(820px, calc(100vh - 32px)); max-height: 96vh; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 18px; background: var(--panel); box-shadow: 0 24px 70px rgba(15,23,42,.28); }
 .glossary-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--line); }
 .glossary-header h2,.glossary-form h3 { margin: 2px 0 0; }
-.glossary-body { min-height: 0; display: grid; grid-template-columns: minmax(280px,.9fr) minmax(320px,1.1fr); }
+.glossary-body { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(280px,.9fr) minmax(360px,1.1fr); overflow: hidden; }
 .glossary-browser,.glossary-form { min-height: 0; padding: 18px; }
 .glossary-browser { display: flex; flex-direction: column; border-right: 1px solid var(--line); }
 .glossary-search-label { margin-bottom: 7px; color: var(--muted); font-size: 12px; font-weight: 700; }
-.glossary-search,.glossary-form input,.glossary-form textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: 9px; padding: 9px 10px; background: var(--panel); color: var(--ink); font: inherit; }
-.glossary-list { min-height: 220px; margin-top: 10px; overflow: auto; }
+.glossary-search,.glossary-form input,.glossary-form textarea,.glossary-form select { width: 100%; border: 1px solid var(--line-strong); border-radius: 9px; padding: 9px 10px; background: var(--panel); color: var(--ink); font: inherit; }
+.glossary-list { min-height: 0; flex: 1; margin-top: 10px; overflow: auto; }
 .glossary-entry { width: 100%; display: grid; grid-template-columns: minmax(90px,.8fr) minmax(120px,1.2fr); gap: 8px; padding: 9px 10px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
 .glossary-entry:hover { background: var(--accent-soft); }
 .glossary-entry small { color: var(--muted); }
 .glossary-source { display: inline-flex; margin-left: 5px; padding: 1px 5px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-strong); font-size: 9px; }
-.glossary-form { display: flex; flex-direction: column; gap: 12px; overflow: auto; }
+.glossary-form { display: grid; grid-template-columns: minmax(0,1fr) 120px; align-content: start; gap: 10px 12px; overflow: auto; }
+.glossary-form > div:first-child,.glossary-field-zh,.glossary-field-note,.glossary-backups,.glossary-message,.glossary-form-actions { grid-column: 1 / -1; }
 .glossary-form label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 700; }
 .glossary-message { min-height: 20px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .glossary-message.is-error { color: #b42318; }
+.glossary-backups { display: grid; gap: 8px; padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--ui-soft, #fafbfc); }
+.glossary-backups > div:first-child { display: grid; gap: 6px; }
+.glossary-backups select { width: 100%; min-width: 0; padding: 8px 9px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); color: var(--ink); font: inherit; font-size: 11.5px; }
+.glossary-backup-actions { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 7px; }
+.glossary-backup-actions button { width: auto; margin: 0; padding: 6px 7px; font-size: 11px; }
+.glossary-backups small { color: var(--muted); line-height: 1.45; }
+.glossary-form-actions { position: sticky; bottom: -18px; z-index: 2; display: grid; grid-template-columns: minmax(0,.8fr) minmax(0,1.2fr); gap: 9px; padding: 10px 0 2px; background: var(--panel); }
+.glossary-form-actions .secondary-action,.glossary-form-actions .btn { width: 100%; margin: 0; }
+.danger-action { color: #b42318; }
+.danger-action:hover:not(:disabled) { background: #feecec; }
+.danger-action:disabled { opacity: .45; cursor: not-allowed; }
+.complex-word-shell { height: min(700px, calc(100vh - 32px)); }
+.complex-word-form { align-content: start; }
 
 .outline-empty {
   padding: 18px 14px;
@@ -208,4 +225,6 @@
   .glossary-dialog { padding: 10px; }
   .glossary-body { display: block; overflow: auto; }
   .glossary-browser { min-height: 300px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .glossary-form { display: flex; flex-direction: column; }
+  .glossary-backup-actions { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }

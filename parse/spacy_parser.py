@@ -36,8 +36,20 @@ _LABELS = {
     "relative": "定语修饰",
     "content": "内容从句",
     "complement": "补充说明",
+    "basis": "依据要求",
     "ambiguous": "关系待确认",
 }
+
+
+def _is_false_technical_acl(token: Any) -> bool:
+    """识别小模型把“<信号名> timing parameter”中的 timing 当动词的情况。"""
+    dep = token.dep_.split(":", 1)[0]
+    return (
+        token.lower_ == "timing"
+        and dep in {"acl", "advcl"}
+        and token.head.pos_ in {"NOUN", "PROPN"}
+        and any(child.lower_ in {"parameter", "parameters"} for child in token.children)
+    )
 
 
 def _main_root(doc: Any) -> Any | None:
@@ -69,12 +81,7 @@ def _clause_roots(doc: Any, main_root: Any) -> list[Any]:
         if token.i != main_root.i and token.dep_.split(":", 1)[0] in _CLAUSE_DEPS
         # en_core_web_sm 常把名词短语“signals, timing parameters”中的 timing
         # 误标成 advcl；该模式没有从句含义，不能从上级分句中剥离。
-        and not (
-            token.dep_.split(":", 1)[0] == "advcl"
-            and token.lower_ == "timing"
-            and token.head.lemma_.lower() in {"define", "specify", "include"}
-            and any(child.lemma_.lower() == "parameter" for child in token.children)
-        )
+        and not _is_false_technical_acl(token)
     ]
 
 
@@ -86,10 +93,10 @@ def _subtree_bounds(token: Any) -> tuple[int, int]:
 
 
 def _marker(token: Any, source: str) -> str:
-    subtree = sorted(token.subtree, key=lambda item: item.i)
+    # 连接词必须直接支配当前从句根；扫描整个子树会把嵌套 when 错挂到上层 required。
     candidates = [
         child
-        for child in subtree
+        for child in token.children
         if child.dep_.split(":", 1)[0] == "mark" or child.lower_ in _REL_WORDS
     ]
     if not candidates:
@@ -123,13 +130,18 @@ def _relation(token: Any, marker: str) -> tuple[str, list[str]]:
         return "purpose", []
     if lower == "such that":
         return "result", []
+    if lower == "as" and token.lemma_.lower() == "require" and any(
+        child.dep_.split(":", 1)[0] == "agent" or child.lower_ == "by" for child in token.children
+    ):
+        return "basis", []
     if lower in {"since", "while", "as"}:
         return "ambiguous", [f"{marker} 可能表达多种逻辑关系，需要结合语境确认"]
     return "ambiguous", ["未能从连接词确定该分句的逻辑关系"]
 
 
-def _nearest_clause_parent(token: Any, roots: list[Any], main_root: Any) -> Any:
+def _nearest_clause_parent(token: Any, roots: list[Any], main_root: Any, elevated_main: set[int] | None = None) -> Any:
     root_by_index = {item.i: item for item in roots}
+    elevated_main = elevated_main or set()
     current = token.head
     seen: set[int] = set()
     while current.i not in seen:
@@ -137,6 +149,8 @@ def _nearest_clause_parent(token: Any, roots: list[Any], main_root: Any) -> Any:
             return main_root
         if current.i in root_by_index:
             return root_by_index[current.i]
+        if current.i in elevated_main:
+            return main_root
         seen.add(current.i)
         if current.head is current:
             break
@@ -144,8 +158,8 @@ def _nearest_clause_parent(token: Any, roots: list[Any], main_root: Any) -> Any:
     return main_root
 
 
-def _is_descendant(root: Any, possible_ancestor: Any, roots: list[Any], main_root: Any) -> bool:
-    current = _nearest_clause_parent(root, roots, main_root)
+def _is_descendant(root: Any, possible_ancestor: Any, roots: list[Any], main_root: Any, elevated_main: set[int] | None = None) -> bool:
+    current = _nearest_clause_parent(root, roots, main_root, elevated_main)
     seen: set[int] = set()
     while current.i not in seen:
         if current.i == possible_ancestor.i:
@@ -153,19 +167,71 @@ def _is_descendant(root: Any, possible_ancestor: Any, roots: list[Any], main_roo
         if current.i == main_root.i:
             return possible_ancestor.i == main_root.i
         seen.add(current.i)
-        current = _nearest_clause_parent(current, roots, main_root)
+        current = _nearest_clause_parent(current, roots, main_root, elevated_main)
     return False
 
 
-def _own_tokens(doc: Any, root: Any, clause_roots: list[Any], main_root: Any) -> list[Any]:
+def _own_tokens(
+    doc: Any,
+    root: Any,
+    clause_roots: list[Any],
+    main_root: Any,
+    elevated_main: list[Any] | None = None,
+) -> list[Any]:
     candidates = list(doc) if root.i == main_root.i else list(root.subtree)
     excluded: set[int] = set()
+    elevated_main = elevated_main or []
+    elevated_indexes = {token.i for token in elevated_main}
     for child_root in clause_roots:
         if child_root.i == root.i:
             continue
-        if _is_descendant(child_root, root, clause_roots, main_root):
+        if _is_descendant(child_root, root, clause_roots, main_root, elevated_indexes):
             excluded.update(token.i for token in child_root.subtree)
+    if root.i != main_root.i:
+        candidate_indexes = {token.i for token in candidates}
+        for conjunct in elevated_main:
+            if conjunct.i not in candidate_indexes:
+                continue
+            excluded.update(token.i for token in conjunct.subtree)
+            if conjunct.i > 0 and doc[conjunct.i - 1].lower_ in {"and", "or", "but"}:
+                excluded.add(conjunct.i - 1)
     return [token for token in candidates if token.i not in excluded]
+
+
+def _elevated_main_conjuncts(doc: Any, main_root: Any) -> list[Any]:
+    """修复有限并列谓语被错误挂到非谓语时间从句下的常见长句。"""
+    result = []
+    for token in doc:
+        if token.dep_.split(":", 1)[0] != "conj" or token.pos_ != "VERB" or token.tag_ not in {"VBZ", "VBP", "VBD"}:
+            continue
+        if not any(child.dep_.split(":", 1)[0] == "cc" for child in token.head.children):
+            continue
+        current = token.head
+        saw_nonfinite_clause = False
+        seen: set[int] = set()
+        while current.i not in seen and current.i != main_root.i:
+            seen.add(current.i)
+            if current.dep_.split(":", 1)[0] in _CLAUSE_DEPS and current.tag_ in {"VBG", "VBN"}:
+                saw_nonfinite_clause = True
+            if current.head is current:
+                break
+            current = current.head
+        if current.i == main_root.i and saw_nonfinite_clause:
+            result.append(token)
+    return result
+
+
+def _elevated_tokens(doc: Any, root: Any, clause_roots: list[Any], main_root: Any, elevated_indexes: set[int]) -> list[Any]:
+    tokens = list(root.subtree)
+    excluded: set[int] = set()
+    for child_root in clause_roots:
+        if _nearest_clause_parent(child_root, clause_roots, main_root, elevated_indexes).i == main_root.i:
+            if child_root.i > root.i:
+                excluded.update(token.i for token in child_root.subtree)
+    useful = [token for token in tokens if token.i not in excluded]
+    if root.i > 0 and doc[root.i - 1].lower_ in {"and", "or", "but"}:
+        useful.append(doc[root.i - 1])
+    return useful
 
 
 def _segments(source: str, tokens: list[Any]) -> list[tuple[int, int]]:
@@ -207,7 +273,8 @@ def _phrase(head: Any | None, include_prepositions: bool = False) -> str:
     while pending:
         parent = pending.pop()
         for child in parent.children:
-            if child.dep_.split(":", 1)[0] not in allowed:
+            false_acl_tail = _is_false_technical_acl(parent) and child.lower_ in {"parameter", "parameters"}
+            if child.dep_.split(":", 1)[0] not in allowed and not _is_false_technical_acl(child) and not false_acl_tail:
                 continue
             tokens.append(child)
             pending.append(child)
@@ -275,9 +342,17 @@ def _grammar(root: Any, main_root: Any, owned_tokens: list[Any] | None = None) -
             (child for child in agent_prep.children if child.dep_.split(":", 1)[0] == "pobj"),
             None,
         )
+    explicit_subject = any(
+        child.dep_.split(":", 1)[0] in {"nsubj", "nsubjpass", "csubj"}
+        for child in root.children
+    )
     passive = any(
         child.dep_.split(":", 1)[0] in {"nsubjpass", "auxpass"}
         for child in root.children
+    ) or (
+        root.tag_ == "VBN"
+        and root.dep_.split(":", 1)[0] in {"acl", "relcl", "advcl"}
+        and not explicit_subject
     )
     modal_tokens = [
         child.text
@@ -315,6 +390,22 @@ def _grammar(root: Any, main_root: Any, owned_tokens: list[Any] | None = None) -
         if child.dep_.split(":", 1)[0] == "conj"
     ]
     antecedent = _phrase(root.head) if root.dep_.split(":", 1)[0] in {"relcl", "acl"} and root.head.pos_ in {"NOUN", "PROPN"} else ""
+    direct_object = _phrase(direct_object_token, include_prepositions=True)
+    complement = _phrase(complement_token, include_prepositions=True)
+    if (
+        direct_object_token is not None
+        and root.lemma_.lower() in {"change", "select"}
+        and direct_object_token.i + 1 < len(root.doc)
+        and root.doc[direct_object_token.i + 1].lower_ == "select"
+    ):
+        direct_object = f"{direct_object} {root.doc[direct_object_token.i + 1].text}".strip()
+        complement = ""
+    if not antecedent and root.dep_.split(":", 1)[0] in {"relcl", "acl"} and root.head.lower_ == "select":
+        head = root.head
+        start = head.i
+        while start > 0 and head.i - start < 4 and root.doc[start - 1].pos_ in {"DET", "ADJ", "NOUN", "PROPN"}:
+            start -= 1
+        antecedent = root.doc[start : head.i + 1].text
     source_text = " ".join(token.text for token in sorted(clause_tokens, key=lambda item: item.i))
     rule_modal = re.search(r"\b(shall|must|should|may|might|can|could|will|would)\b", source_text, re.I)
     rule_negated = bool(re.search(r"\b(?:not|never|neither|nor)\b", source_text, re.I))
@@ -326,13 +417,13 @@ def _grammar(root: Any, main_root: Any, owned_tokens: list[Any] | None = None) -
     return Grammar(
         subject=_phrase(subject_token),
         predicate=predicate,
-        object=_phrase(direct_object_token, include_prepositions=True),
+        object=direct_object,
         agent=_phrase(agent_token),
-        complement=_phrase(complement_token, include_prepositions=True),
+        complement=complement,
         voice="passive" if passive else "active",
         negated=negated,
         modality=" ".join(modal_tokens),
-        direct_object=_phrase(direct_object_token, include_prepositions=True),
+        direct_object=direct_object,
         indirect_object=_phrase(indirect_object_token, include_prepositions=True),
         auxiliaries=[token.text for token in sorted(auxiliary_tokens, key=lambda item: item.i)],
         particles=[token.text for token in sorted(particle_tokens, key=lambda item: item.i)],
@@ -411,13 +502,18 @@ def parse_spacy(text: str) -> ParsedSentence | None:
         return None
 
     roots = _clause_roots(doc, main_root)
+    elevated_main = _elevated_main_conjuncts(doc, main_root)
+    elevated_indexes = {token.i for token in elevated_main}
     repaired_relative = _repaired_relative(doc, source, main_root)
     bounds = {root.i: _subtree_bounds(root) for root in roots}
     roots.sort(key=lambda token: bounds[token.i])
     root_ids = {main_root.i: "c0"}
     root_ids.update({root.i: f"c{index}" for index, root in enumerate(roots, start=1)})
 
-    main_tokens = _own_tokens(doc, main_root, roots, main_root)
+    main_tokens = _own_tokens(doc, main_root, roots, main_root, elevated_main)
+    for conjunct in elevated_main:
+        main_tokens.extend(_elevated_tokens(doc, conjunct, roots, main_root, elevated_indexes))
+    main_tokens = sorted({token.i: token for token in main_tokens}.values(), key=lambda token: token.i)
     if repaired_relative:
         main_tokens = [
             token
@@ -426,6 +522,11 @@ def parse_spacy(text: str) -> ParsedSentence | None:
         ]
     main_segments = _segments(source, main_tokens)
     main_grammar = _grammar(main_root, main_root, main_tokens)
+    if elevated_main:
+        main_grammar.coordination = [
+            _display_text(source, _segments(source, _elevated_tokens(doc, conjunct, roots, main_root, elevated_indexes)))
+            for conjunct in elevated_main
+        ]
     if repaired_relative and main_grammar.object.lower() == repaired_relative["marker"].lower():
         main_grammar.object = ""
     nodes = [
@@ -450,8 +551,8 @@ def parse_spacy(text: str) -> ParsedSentence | None:
         start, end = bounds[root.i]
         marker = _marker(root, source)
         relation, warnings = _relation(root, marker)
-        parent_root = _nearest_clause_parent(root, roots, main_root)
-        own_tokens = _own_tokens(doc, root, roots, main_root)
+        parent_root = _nearest_clause_parent(root, roots, main_root, elevated_indexes)
+        own_tokens = _own_tokens(doc, root, roots, main_root, elevated_main)
         own_segments = _segments(source, own_tokens)
         nodes.append(
             ClauseNode(

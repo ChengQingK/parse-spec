@@ -28,15 +28,10 @@ const docMeta = document.getElementById("doc-meta");
 const recentDocs = document.getElementById("recent-docs");
 const recentDocsMenu = document.getElementById("recent-docs-menu");
 const recentDocsList = document.getElementById("recent-docs-list");
-const settingsToggle = document.getElementById("settings-toggle");
-const settingsPopover = document.getElementById("settings-popover");
-const settingsClose = document.getElementById("settings-close");
 const themeCycle = document.getElementById("theme-cycle");
 const themeIcon = document.getElementById("theme-icon");
-const depthSelect = document.getElementById("depth-select");
-const structureSelect = document.getElementById("structure-select");
-const positionSelect = document.getElementById("position-select");
-const settingsReset = document.getElementById("settings-reset");
+const depthButtons = ["concise", "standard", "detailed"].map((value) => document.getElementById(`depth-${value}`)).filter(Boolean);
+const structureButtons = ["bracket", "linked"].map((value) => document.getElementById(`structure-${value}`)).filter(Boolean);
 const outlineToggle = document.getElementById("outline-toggle");
 const outlinePanel = document.getElementById("outline-panel");
 const outlineClose = document.getElementById("outline-close");
@@ -45,8 +40,21 @@ const bookmarkToggle = document.getElementById("bookmark-toggle");
 const bookmarkPanel = document.getElementById("bookmark-panel");
 const bookmarkClose = document.getElementById("bookmark-close");
 const bookmarkAdd = document.getElementById("bookmark-add");
+const bookmarkName = document.getElementById("bookmark-name");
 const bookmarkContent = document.getElementById("bookmark-content");
 const navResizer = document.getElementById("nav-resizer");
+const complexWordToggle = document.getElementById("complex-word-toggle");
+const complexWordDialog = document.getElementById("complex-word-dialog");
+const complexWordClose = document.getElementById("complex-word-close");
+const complexWordSearch = document.getElementById("complex-word-search");
+const complexWordList = document.getElementById("complex-word-list");
+const complexWordForm = document.getElementById("complex-word-form");
+const complexWordWord = document.getElementById("complex-word-word");
+const complexWordLevel = document.getElementById("complex-word-level");
+const complexWordZh = document.getElementById("complex-word-zh");
+const complexWordNote = document.getElementById("complex-word-note");
+const complexWordMessage = document.getElementById("complex-word-message");
+const complexWordDelete = document.getElementById("complex-word-delete");
 const glossaryToggle = document.getElementById("glossary-toggle");
 const glossaryDialog = document.getElementById("glossary-dialog");
 const glossaryClose = document.getElementById("glossary-close");
@@ -58,15 +66,25 @@ const glossaryPos = document.getElementById("glossary-pos");
 const glossaryZh = document.getElementById("glossary-zh");
 const glossaryNote = document.getElementById("glossary-note");
 const glossaryMessage = document.getElementById("glossary-message");
+const glossaryBackupSelect = document.getElementById("glossary-backup-select");
+const glossaryBackupCreate = document.getElementById("glossary-backup-create");
+const glossaryBackupRestore = document.getElementById("glossary-backup-restore");
+const glossaryBackupDownload = document.getElementById("glossary-backup-download");
+const glossaryBackupDelete = document.getElementById("glossary-backup-delete");
+const glossaryDelete = document.getElementById("glossary-delete");
+const pageStatus = document.getElementById("page-status");
+const zoomOut = document.getElementById("zoom-out");
+const zoomReset = document.getElementById("zoom-reset");
+const zoomIn = document.getElementById("zoom-in");
 
 const SETTINGS_KEY = "parse-spec:settings";
 const OUTLINE_WIDTH_KEY = "parse-spec:outline-width";
+const PDF_ZOOM_KEY = "parse-spec:pdf-zoom";
 const LEGACY_BOOKMARKS_KEY = "parse-spec:bookmarks";
-const DEFAULT_SETTINGS = Object.freeze({ theme: "light", analysisDepth: "standard", structureView: "bracket", panelPosition: "right" });
+const DEFAULT_SETTINGS = Object.freeze({ theme: "light", analysisDepth: "standard", structureView: "bracket" });
 const VALID_THEMES = new Set(["light", "dark", "eye"]);
 const VALID_DEPTHS = new Set(["concise", "standard", "detailed"]);
 const VALID_STRUCTURE_VIEWS = new Set(["bracket", "linked"]);
-const VALID_POSITIONS = new Set(["left", "right", "top", "bottom", "off"]);
 const THEME_ORDER = ["light", "dark", "eye"];
 const THEME_LABELS = Object.freeze({ light: "浅色", dark: "暗色", eye: "护眼色" });
 const THEME_ICONS = Object.freeze({ light: "☀", dark: "☾", eye: "◐" });
@@ -88,11 +106,19 @@ let bookmarkCacheKey = null;
 let bookmarkCache = [];
 let bookmarkLoadSerial = 0;
 let glossaryEntries = [];
+let glossaryBackups = [];
+let activeGlossarySource = null;
+let complexWordEntries = [];
+let activeComplexWordSource = null;
+let complexWordSuggestionSerial = 0;
 let activeRecentDocumentKey = null;
+let pdfZoom = 1;
+let committedPdfZoom = 1;
+let zoomCommitTimer = 0;
+let pageStatusFrame = 0;
 let uiSettings = loadSettings();
-let panelPosition = uiSettings.panelPosition;
 
-/* ---------------- 设置 ---------------- */
+/* ---------------- 界面状态 ---------------- */
 
 function loadSettings() {
   try {
@@ -103,7 +129,6 @@ function loadSettings() {
       theme: VALID_THEMES.has(parsed.theme) ? parsed.theme : DEFAULT_SETTINGS.theme,
       analysisDepth: VALID_DEPTHS.has(parsed.analysisDepth) ? parsed.analysisDepth : DEFAULT_SETTINGS.analysisDepth,
       structureView: VALID_STRUCTURE_VIEWS.has(parsed.structureView) ? parsed.structureView : DEFAULT_SETTINGS.structureView,
-      panelPosition: VALID_POSITIONS.has(parsed.panelPosition) ? parsed.panelPosition : DEFAULT_SETTINGS.panelPosition,
     };
   } catch (_ignored) {
     return { ...DEFAULT_SETTINGS };
@@ -116,10 +141,9 @@ function saveSettings() {
   } catch (_ignored) {}
 }
 
-function syncSettingsControls() {
-  if (depthSelect) depthSelect.value = uiSettings.analysisDepth;
-  if (structureSelect) structureSelect.value = uiSettings.structureView;
-  if (positionSelect) positionSelect.value = uiSettings.panelPosition;
+function syncAnalysisControls() {
+  for (const button of depthButtons) button.setAttribute("aria-pressed", String(button.dataset.analysisDepth === uiSettings.analysisDepth));
+  for (const button of structureButtons) button.setAttribute("aria-pressed", String(button.dataset.structureView === uiSettings.structureView));
 }
 
 function setTheme(theme, persist = true) {
@@ -138,6 +162,86 @@ function setTheme(theme, persist = true) {
 function cycleTheme() {
   const index = THEME_ORDER.indexOf(uiSettings.theme);
   setTheme(THEME_ORDER[(index + 1) % THEME_ORDER.length]);
+}
+
+function clampPdfZoom(value) {
+  return Math.max(.75, Math.min(2, Math.round(Number(value) * 100) / 100));
+}
+
+function updatePdfZoomControls() {
+  if (!zoomReset) return;
+  const percent = `${Math.round(pdfZoom * 100)}%`;
+  zoomReset.textContent = percent;
+  zoomReset.setAttribute("aria-label", `当前 PDF 缩放 ${percent}，点击恢复为 100%`);
+  if (zoomOut) zoomOut.disabled = pdfZoom <= .75;
+  if (zoomIn) zoomIn.disabled = pdfZoom >= 2;
+}
+
+function commitPdfZoom(persist = true) {
+  if (!pagesEl || !pagesEl.style) return;
+  const previous = committedPdfZoom || 1;
+  const ratio = pdfZoom / previous;
+  const pane = documentPane;
+  const centerTop = pane ? (Number(pane.scrollTop) || 0) + (Number(pane.clientHeight) || 0) / 2 : 0;
+  const centerLeft = pane ? (Number(pane.scrollLeft) || 0) + (Number(pane.clientWidth) || 0) / 2 : 0;
+  pagesEl.classList.add("is-committing-zoom");
+  pagesEl.style.zoom = String(pdfZoom);
+  pagesEl.style.transform = "";
+  committedPdfZoom = pdfZoom;
+  if (pane && ratio !== 1) {
+    pane.scrollTop = Math.max(0, centerTop * ratio - (Number(pane.clientHeight) || 0) / 2);
+    pane.scrollLeft = Math.max(0, centerLeft * ratio - (Number(pane.clientWidth) || 0) / 2);
+  }
+  requestUiFrame(() => pagesEl.classList.remove("is-committing-zoom"));
+  if (persist) {
+    try { if (window.localStorage) window.localStorage.setItem(PDF_ZOOM_KEY, String(pdfZoom)); } catch (_ignored) {}
+  }
+  schedulePageStatusUpdate();
+}
+
+function setPdfZoom(value, persist = true, animate = true) {
+  pdfZoom = clampPdfZoom(value);
+  updatePdfZoomControls();
+  if (!pagesEl || !pagesEl.style) return;
+  if (!animate) {
+    clearTimeout(zoomCommitTimer);
+    zoomCommitTimer = 0;
+    committedPdfZoom = pdfZoom;
+    pagesEl.style.zoom = String(pdfZoom);
+    pagesEl.style.transform = "";
+    if (persist) {
+      try { if (window.localStorage) window.localStorage.setItem(PDF_ZOOM_KEY, String(pdfZoom)); } catch (_ignored) {}
+    }
+    return;
+  }
+  pagesEl.style.transform = `scale(${pdfZoom / committedPdfZoom})`;
+  clearTimeout(zoomCommitTimer);
+  zoomCommitTimer = setTimeout(() => {
+    zoomCommitTimer = 0;
+    commitPdfZoom(persist);
+  }, 120);
+}
+
+function restorePdfZoom() {
+  let saved = 1;
+  try { saved = Number(window.localStorage && window.localStorage.getItem(PDF_ZOOM_KEY)) || 1; } catch (_ignored) {}
+  setPdfZoom(saved, false, false);
+}
+
+function updatePageStatus() {
+  if (!pageStatus) return;
+  pageStatus.textContent = currentPdf ? `${currentVisiblePage()} / ${currentPdf.numPages}` : "— / —";
+}
+
+function schedulePageStatusUpdate() {
+  if (pageStatusFrame || typeof requestAnimationFrame !== "function") {
+    if (!pageStatusFrame) updatePageStatus();
+    return;
+  }
+  pageStatusFrame = requestAnimationFrame(() => {
+    pageStatusFrame = 0;
+    updatePageStatus();
+  });
 }
 
 function recentDocumentKey(file) {
@@ -172,7 +276,6 @@ function rememberRecentDocument(file) {
 
 function openRecentDocuments() {
   if (!recentDocsMenu || !docMeta) return;
-  closeSettings();
   renderRecentDocuments();
   recentDocsMenu.hidden = false;
   docMeta.setAttribute("aria-expanded", "true");
@@ -207,7 +310,7 @@ function setDocumentLabel(file, status = "") {
 function setAnalysisDepth(depth, persist = true) {
   const next = VALID_DEPTHS.has(depth) ? depth : DEFAULT_SETTINGS.analysisDepth;
   uiSettings.analysisDepth = next;
-  if (depthSelect) depthSelect.value = next;
+  for (const button of depthButtons) button.setAttribute("aria-pressed", String(button.dataset.analysisDepth === next));
   if (persist) saveSettings();
   refreshSelectedAnalysis(false);
 }
@@ -215,37 +318,9 @@ function setAnalysisDepth(depth, persist = true) {
 function setStructureView(view, persist = true) {
   const next = VALID_STRUCTURE_VIEWS.has(view) ? view : DEFAULT_SETTINGS.structureView;
   uiSettings.structureView = next;
-  if (structureSelect) structureSelect.value = next;
+  for (const button of structureButtons) button.setAttribute("aria-pressed", String(button.dataset.structureView === next));
   if (persist) saveSettings();
   refreshSelectedAnalysis(false);
-}
-
-function openSettings() {
-  if (!settingsPopover || !settingsToggle) return;
-  closeRecentDocuments();
-  settingsPopover.hidden = false;
-  settingsToggle.setAttribute("aria-expanded", "true");
-}
-
-function closeSettings() {
-  if (!settingsPopover || !settingsToggle) return;
-  settingsPopover.hidden = true;
-  settingsToggle.setAttribute("aria-expanded", "false");
-}
-
-function toggleSettings() {
-  if (!settingsPopover || settingsPopover.hidden) openSettings();
-  else closeSettings();
-}
-
-function resetSettings() {
-  uiSettings = { ...DEFAULT_SETTINGS };
-  setTheme(uiSettings.theme, false);
-  setAnalysisDepth(uiSettings.analysisDepth, false);
-  setStructureView(uiSettings.structureView, false);
-  setPanelPosition(uiSettings.panelPosition, false, true);
-  saveSettings();
-  syncSettingsControls();
 }
 
 /* ---------------- 句子切分 ---------------- */
@@ -658,11 +733,12 @@ function wireTextLayer(
   const derivedHeight = Math.max(0, ...words.map((word) => Number(word.y1) || 0));
   const width = Number.isFinite(pageWidth) ? pageWidth : Math.max(0, Number(wrapRect.width) || derivedWidth);
   const height = Number.isFinite(pageHeight) ? pageHeight : Math.max(0, Number(wrapRect.height) || derivedHeight);
+  const visualScale = width > 0 && Number(wrapRect.width) > 0 ? Number(wrapRect.width) / width : pdfZoom;
   const targets = analysisTargets.map((analysisTarget, sentenceIndex) => {
     if (!analysisTarget.locations.some((location) => location.pageNum === pageNum && location.sentenceIndex === sentenceIndex)) {
       analysisTarget.locations.push({ pageNum, sentenceIndex });
     }
-    const exactRects = buildSentenceDomRects(sentences[sentenceIndex], renderedTextDivs, wrapRect, width, height);
+    const exactRects = buildSentenceDomRects(sentences[sentenceIndex], renderedTextDivs, wrapRect, width, height, null, visualScale);
     const fallbackRects = buildSentenceLineRects(sentences[sentenceIndex], rowTol).map((rect) => {
       const left = Math.max(0, Math.min(width, rect.left));
       const top = Math.max(0, Math.min(height, rect.top));
@@ -716,7 +792,11 @@ function wireTextLayer(
 
   const eventTarget = (event) => {
     const rect = wrap.getBoundingClientRect ? wrap.getBoundingClientRect() : wrapRect;
-    const localTarget = targetAtPoint(targets, Number(event.clientX) - rect.left, Number(event.clientY) - rect.top);
+    const localTarget = targetAtPoint(
+      targets,
+      (Number(event.clientX) - rect.left) / pdfZoom,
+      (Number(event.clientY) - rect.top) / pdfZoom,
+    );
     return localTarget ? localTarget.analysisTarget : null;
   };
   textLayer.addEventListener("mousemove", (event) => {
@@ -927,6 +1007,7 @@ function scrollToPage(pageNum) {
   if (pageElement.scrollIntoView) pageElement.scrollIntoView({ behavior: "smooth", block: "start" });
   pageElement.classList.add("outline-target-page");
   setTimeout(() => pageElement.classList.remove("outline-target-page"), 1100);
+  setTimeout(updatePageStatus, 180);
   return true;
 }
 
@@ -1062,9 +1143,10 @@ function renderBookmarks() {
   bookmarkContent.innerHTML = bookmarks.map((bookmark) => `
     <div class="bookmark-item">
       <button class="outline-item bookmark-jump" type="button" data-bookmark-action="jump" data-bookmark-id="${esc(bookmark.id)}">
-        <strong>第 ${Number(bookmark.pageNum)} 页${Number.isInteger(bookmark.sentenceIndex) ? ` · 句子 ${bookmark.sentenceIndex + 1}` : ""}</strong>
-        <small>${esc(bookmark.text || "页面书签")}</small>
+        <strong>${esc(bookmark.name || `第 ${Number(bookmark.pageNum)} 页`)}</strong>
+        <small>第 ${Number(bookmark.pageNum)} 页${Number.isInteger(bookmark.sentenceIndex) ? ` · 句子 ${bookmark.sentenceIndex + 1}` : ""} · ${esc(bookmark.text || "页面书签")}</small>
       </button>
+      <button class="bookmark-rename" type="button" data-bookmark-action="rename" data-bookmark-id="${esc(bookmark.id)}" aria-label="重命名此书签">✎</button>
       <button class="bookmark-remove" type="button" data-bookmark-action="remove" data-bookmark-id="${esc(bookmark.id)}" aria-label="删除此书签">×</button>
     </div>`).join("");
 }
@@ -1079,6 +1161,7 @@ async function addBookmark() {
   const pageNum = target ? target.pageNum : currentVisiblePage();
   const bookmark = {
     id: `${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    name: bookmarkName && bookmarkName.value.trim() ? bookmarkName.value.trim() : `第 ${pageNum} 页`,
     pageNum,
     sentenceIndex: target ? target.sentenceIndex : null,
     text: target ? target.text : `第 ${pageNum} 页`,
@@ -1086,14 +1169,36 @@ async function addBookmark() {
   };
   const bookmarks = documentBookmarks();
   const duplicate = bookmarks.find((item) => item.pageNum === bookmark.pageNum && item.sentenceIndex === bookmark.sentenceIndex && item.text === bookmark.text);
-  if (duplicate) return duplicate;
+  if (duplicate) {
+    if (bookmarkName && bookmarkName.value.trim()) {
+      duplicate.name = bookmark.name;
+      await saveDocumentBookmarks(bookmarks);
+      bookmarkName.value = "";
+    }
+    return duplicate;
+  }
   bookmarks.unshift(bookmark);
   await saveDocumentBookmarks(bookmarks);
+  if (bookmarkName) bookmarkName.value = "";
   return bookmark;
 }
 
 async function removeBookmark(id) {
   await saveDocumentBookmarks(documentBookmarks().filter((bookmark) => bookmark.id !== id));
+}
+
+async function renameBookmark(id, requestedName = null) {
+  const bookmark = documentBookmarks().find((item) => item.id === id);
+  if (!bookmark) return false;
+  const promptValue = requestedName === null && typeof window.prompt === "function"
+    ? window.prompt("书签名称", bookmark.name || `第 ${bookmark.pageNum} 页`)
+    : requestedName;
+  if (promptValue === null) return false;
+  const name = String(promptValue).trim().slice(0, 200);
+  if (!name) return false;
+  bookmark.name = name;
+  await saveDocumentBookmarks(documentBookmarks());
+  return true;
 }
 
 function jumpToBookmark(bookmark) {
@@ -1108,6 +1213,205 @@ function jumpToBookmark(bookmark) {
 }
 
 /* ---------------- 术语表 ---------------- */
+
+function renderComplexWordEntries(query = "") {
+  if (!complexWordList) return;
+  const needle = String(query).trim().toLowerCase();
+  const visible = complexWordEntries.filter((entry) => !needle
+    || entry.word.toLowerCase().includes(needle)
+    || String(entry.zh || "").toLowerCase().includes(needle));
+  if (!visible.length) {
+    complexWordList.innerHTML = `<div class="outline-empty">没有匹配单词。可在右侧新增。</div>`;
+    return;
+  }
+  complexWordList.innerHTML = visible.slice(0, 500).map((entry) => `
+    <button class="glossary-entry" type="button" data-complex-word="${esc(entry.word)}">
+      <span><strong>${esc(entry.word)}</strong><span class="glossary-source">${entry.source === "custom" ? "自定义" : "内置"}</span><br><small>${esc(entry.level || "较难")}</small></span>
+      <span>${esc(entry.zh || "")}</span>
+    </button>`).join("");
+}
+
+async function loadComplexWordEntries() {
+  if (complexWordList) complexWordList.innerHTML = `<div class="outline-empty">正在读取复杂词表…</div>`;
+  try {
+    const response = await fetch("/api/complex-words");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    complexWordEntries = Array.isArray(data.entries) ? data.entries : [];
+    renderComplexWordEntries(complexWordSearch ? complexWordSearch.value : "");
+  } catch (error) {
+    complexWordEntries = [];
+    if (complexWordList) complexWordList.innerHTML = `<div class="outline-empty">复杂词表读取失败：${esc(String(error))}</div>`;
+  }
+}
+
+async function suggestComplexWordMeaning(word) {
+  const requestId = ++complexWordSuggestionSerial;
+  if (complexWordMessage) {
+    complexWordMessage.classList.remove("is-error");
+    complexWordMessage.textContent = `正在查询“${word}”的本地释义…`;
+  }
+  try {
+    const response = await fetch(`/api/complex-words/suggest?word=${encodeURIComponent(word)}`);
+    const data = await response.json();
+    if (requestId !== complexWordSuggestionSerial || !complexWordWord || complexWordWord.value.trim().toLowerCase() !== word) return;
+    if (!response.ok || !data.suggestion) throw new Error(data.error || `HTTP ${response.status}`);
+    const suggestion = data.suggestion;
+    if (complexWordZh) complexWordZh.value = suggestion.zh || "";
+    if (complexWordLevel) complexWordLevel.value = suggestion.level || "较难";
+    if (complexWordNote) complexWordNote.value = suggestion.note || "";
+    if (complexWordMessage) complexWordMessage.textContent = `已自动填充“${word}”的本地释义，请确认后保存。`;
+  } catch (error) {
+    if (requestId !== complexWordSuggestionSerial) return;
+    if (complexWordMessage) {
+      complexWordMessage.classList.add("is-error");
+      complexWordMessage.textContent = `自动释义失败：${String(error)}。本地词典未命中时不会猜测词义。`;
+    }
+  }
+}
+
+function editComplexWord(word) {
+  const normalized = String(word || "").trim().toLowerCase();
+  const entry = complexWordEntries.find((item) => item.word.toLowerCase() === normalized);
+  activeComplexWordSource = entry ? entry.source : null;
+  if (complexWordWord) complexWordWord.value = entry ? entry.word : normalized;
+  if (complexWordLevel) complexWordLevel.value = entry ? (entry.level || "较难") : "较难";
+  if (complexWordZh) complexWordZh.value = entry ? (entry.zh || "") : "";
+  if (complexWordNote) complexWordNote.value = entry ? (entry.note || "") : "";
+  if (complexWordDelete) complexWordDelete.disabled = !entry || entry.source !== "custom";
+  if (complexWordMessage) {
+    complexWordMessage.classList.remove("is-error");
+    complexWordMessage.textContent = entry
+      ? (entry.source === "custom" ? "正在编辑自定义复杂词。" : "保存后会在 complex_words.json 中覆盖该内置释义。")
+      : `已从原文选中“${normalized}”，正在自动查询中文释义。`;
+  }
+  if (!entry && normalized) suggestComplexWordMeaning(normalized);
+}
+
+async function openComplexWords(word = "") {
+  if (!complexWordDialog || !complexWordToggle) return;
+  if (glossaryDialog && !glossaryDialog.hidden) closeGlossary();
+  complexWordDialog.hidden = false;
+  complexWordToggle.setAttribute("aria-expanded", "true");
+  const normalized = String(word || "").trim().toLowerCase();
+  if (complexWordSearch) complexWordSearch.value = normalized;
+  await loadComplexWordEntries();
+  if (normalized) {
+    renderComplexWordEntries(normalized);
+    editComplexWord(normalized);
+  }
+  if (normalized && complexWordZh && complexWordZh.focus) complexWordZh.focus();
+  else if (complexWordSearch && complexWordSearch.focus) complexWordSearch.focus();
+}
+
+function closeComplexWords() {
+  if (!complexWordDialog || !complexWordToggle) return;
+  complexWordDialog.hidden = true;
+  complexWordToggle.setAttribute("aria-expanded", "false");
+}
+
+function syncComplexWordDeleteState() {
+  const word = complexWordWord ? complexWordWord.value.trim().toLowerCase() : "";
+  const entry = complexWordEntries.find((item) => item.word.toLowerCase() === word);
+  activeComplexWordSource = entry ? entry.source : null;
+  if (complexWordDelete) complexWordDelete.disabled = !entry || entry.source !== "custom";
+}
+
+async function submitComplexWord(event) {
+  if (event && event.preventDefault) event.preventDefault();
+  const payload = {
+    word: complexWordWord ? complexWordWord.value.trim() : "",
+    level: complexWordLevel ? complexWordLevel.value : "较难",
+    zh: complexWordZh ? complexWordZh.value.trim() : "",
+    note: complexWordNote ? complexWordNote.value.trim() : "",
+  };
+  try {
+    const response = await fetch("/api/complex-words", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    await loadComplexWordEntries();
+    if (complexWordSearch) complexWordSearch.value = data.entry.word;
+    renderComplexWordEntries(data.entry.word);
+    editComplexWord(data.entry.word);
+    if (complexWordMessage) complexWordMessage.textContent = `已保存“${data.entry.word}”，当前句会立即重新识别复杂词。`;
+    sentenceResults.clear();
+    refreshSelectedAnalysis();
+  } catch (error) {
+    if (complexWordMessage) {
+      complexWordMessage.classList.add("is-error");
+      complexWordMessage.textContent = `保存失败：${String(error)}`;
+    }
+  }
+}
+
+async function deleteComplexWord() {
+  const word = complexWordWord ? complexWordWord.value.trim().toLowerCase() : "";
+  if (!word || activeComplexWordSource !== "custom") return;
+  if (typeof window.confirm === "function" && !window.confirm(`确定删除自定义复杂词“${word}”？`)) return;
+  try {
+    const response = await fetch("/api/complex-words", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ word }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    await loadComplexWordEntries();
+    if (complexWordSearch) complexWordSearch.value = word;
+    renderComplexWordEntries(word);
+    editComplexWord(word);
+    if (complexWordMessage) complexWordMessage.textContent = data.reverted_to_builtin
+      ? `已删除“${word}”的自定义覆盖，恢复为内置释义。`
+      : `已删除自定义复杂词“${word}”。`;
+    sentenceResults.clear();
+    refreshSelectedAnalysis();
+  } catch (error) {
+    if (complexWordMessage) {
+      complexWordMessage.classList.add("is-error");
+      complexWordMessage.textContent = `删除失败：${String(error)}`;
+    }
+  }
+}
+
+function wordAtTextOffset(text, rawOffset) {
+  const source = String(text || "");
+  const offset = Math.max(0, Math.min(source.length, Number(rawOffset) || 0));
+  const pattern = /[A-Za-z][A-Za-z'-]*/g;
+  for (const match of source.matchAll(pattern)) {
+    const end = match.index + match[0].length;
+    if (offset >= match.index && offset <= end) return match[0].toLowerCase();
+  }
+  return "";
+}
+
+function sourceWordFromContextEvent(event, root) {
+  if (!root) return "";
+  const selection = window.getSelection ? window.getSelection() : null;
+  const selected = selection ? String(selection.toString()).trim() : "";
+  if (/^[A-Za-z][A-Za-z'-]*$/.test(selected) && (!selection.anchorNode || root.contains(selection.anchorNode))) return selected.toLowerCase();
+  let node = null;
+  let offset = 0;
+  const position = document.caretPositionFromPoint && document.caretPositionFromPoint(event.clientX, event.clientY);
+  if (position) {
+    node = position.offsetNode;
+    offset = position.offset;
+  } else if (document.caretRangeFromPoint) {
+    const range = document.caretRangeFromPoint(event.clientX, event.clientY);
+    if (range) {
+      node = range.startContainer;
+      offset = range.startOffset;
+    }
+  }
+  if (!node || !root.contains(node) || !document.createRange) return "";
+  const prefix = document.createRange();
+  prefix.selectNodeContents(root);
+  prefix.setEnd(node, offset);
+  return wordAtTextOffset(root.textContent, prefix.toString().length);
+}
 
 function renderGlossaryEntries(query = "") {
   if (!glossaryList) return;
@@ -1140,11 +1444,120 @@ async function loadGlossaryEntries() {
   }
 }
 
-function openGlossary() {
+function renderGlossaryBackups() {
+  if (!glossaryBackupSelect) return;
+  const selected = glossaryBackupSelect.value;
+  glossaryBackupSelect.innerHTML = glossaryBackups.length
+    ? glossaryBackups.map((backup) => `<option value="${esc(backup.filename)}">${esc(backup.created_at || backup.filename)} · ${Number(backup.entry_count) || 0} 条 · ${esc(backup.reason || "备份")}</option>`).join("")
+    : '<option value="">暂无备份</option>';
+  if (glossaryBackups.some((backup) => backup.filename === selected)) glossaryBackupSelect.value = selected;
+}
+
+async function loadGlossaryBackups() {
+  try {
+    const response = await fetch("/api/glossary/backups");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    glossaryBackups = Array.isArray(data.backups) ? data.backups : [];
+    renderGlossaryBackups();
+  } catch (error) {
+    glossaryBackups = [];
+    renderGlossaryBackups();
+    if (glossaryMessage) {
+      glossaryMessage.classList.add("is-error");
+      glossaryMessage.textContent = `备份列表读取失败：${String(error)}`;
+    }
+  }
+}
+
+async function createGlossaryBackup() {
+  if (glossaryMessage) {
+    glossaryMessage.classList.remove("is-error");
+    glossaryMessage.textContent = "正在创建备份…";
+  }
+  try {
+    const response = await fetch("/api/glossary/backups", { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    await loadGlossaryBackups();
+    if (glossaryBackupSelect && data.backup) glossaryBackupSelect.value = data.backup.filename;
+    if (glossaryMessage) glossaryMessage.textContent = "术语表备份已保存到项目 backups/glossary 目录。";
+  } catch (error) {
+    if (glossaryMessage) {
+      glossaryMessage.classList.add("is-error");
+      glossaryMessage.textContent = `备份失败：${String(error)}`;
+    }
+  }
+}
+
+async function restoreGlossaryBackup() {
+  const filename = glossaryBackupSelect && glossaryBackupSelect.value;
+  if (!filename) return;
+  if (typeof window.confirm === "function" && !window.confirm("恢复所选备份？当前术语表会先自动备份。")) return;
+  if (glossaryMessage) {
+    glossaryMessage.classList.remove("is-error");
+    glossaryMessage.textContent = "正在恢复备份…";
+  }
+  try {
+    const response = await fetch("/api/glossary/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    sentenceResults.clear();
+    await Promise.all([loadGlossaryEntries(), loadGlossaryBackups()]);
+    if (glossaryMessage) glossaryMessage.textContent = `已从 ${filename} 恢复术语表。`;
+    if (selectedTarget) {
+      const requestId = ++requestSerial;
+      renderLoadingPanel(selectedTarget);
+      loadAndRender(selectedTarget, requestId, true);
+    }
+  } catch (error) {
+    if (glossaryMessage) {
+      glossaryMessage.classList.add("is-error");
+      glossaryMessage.textContent = `恢复失败：${String(error)}`;
+    }
+  }
+}
+
+function downloadGlossaryBackup() {
+  const filename = glossaryBackupSelect && glossaryBackupSelect.value;
+  if (!filename || !window.location) return;
+  window.location.href = `/api/glossary/backups/${encodeURIComponent(filename)}`;
+}
+
+async function deleteGlossaryBackup() {
+  const filename = glossaryBackupSelect && glossaryBackupSelect.value;
+  if (!filename) return;
+  if (typeof window.confirm === "function" && !window.confirm(`确定删除备份 ${filename}？此操作无法恢复。`)) return;
+  try {
+    const response = await fetch(`/api/glossary/backups/${encodeURIComponent(filename)}`, { method: "DELETE" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    await loadGlossaryBackups();
+    if (glossaryMessage) glossaryMessage.textContent = `已删除备份 ${filename}。`;
+  } catch (error) {
+    if (glossaryMessage) {
+      glossaryMessage.classList.add("is-error");
+      glossaryMessage.textContent = `删除备份失败：${String(error)}`;
+    }
+  }
+}
+
+async function openGlossary(word = "") {
   if (!glossaryDialog || !glossaryToggle) return;
+  if (complexWordDialog && !complexWordDialog.hidden) closeComplexWords();
   glossaryDialog.hidden = false;
   glossaryToggle.setAttribute("aria-expanded", "true");
-  loadGlossaryEntries();
+  const needle = String(word).trim();
+  if (glossarySearch) glossarySearch.value = needle;
+  await Promise.all([loadGlossaryEntries(), loadGlossaryBackups()]);
+  if (needle) {
+    renderGlossaryEntries(needle);
+    editGlossaryEntry(glossaryEntries.find((entry) => entry.word.toLowerCase() === needle.toLowerCase())?.word || needle);
+  }
   if (glossarySearch && glossarySearch.focus) glossarySearch.focus();
 }
 
@@ -1157,13 +1570,62 @@ function closeGlossary() {
 function editGlossaryEntry(word) {
   const entry = glossaryEntries.find((item) => item.word === word);
   if (!entry) return;
+  activeGlossarySource = entry.source;
   if (glossaryWord) glossaryWord.value = entry.word;
   if (glossaryPos) glossaryPos.value = entry.pos || "";
   if (glossaryZh) glossaryZh.value = entry.zh || "";
   if (glossaryNote) glossaryNote.value = entry.note || "";
+  if (glossaryDelete) {
+    glossaryDelete.disabled = entry.source !== "custom";
+    glossaryDelete.title = entry.source === "custom" ? `删除自定义词条 ${entry.word}` : "内置词条不能删除；保存覆盖后可删除自定义覆盖";
+  }
   if (glossaryMessage) {
     glossaryMessage.classList.remove("is-error");
     glossaryMessage.textContent = entry.source === "custom" ? "正在编辑自定义词条。" : "保存后会在 glossary.json 中覆盖该内置释义。";
+  }
+}
+
+function syncGlossaryDeleteState() {
+  const word = glossaryWord ? glossaryWord.value.trim().toLowerCase() : "";
+  const entry = glossaryEntries.find((item) => item.word.toLowerCase() === word);
+  activeGlossarySource = entry ? entry.source : null;
+  if (glossaryDelete) glossaryDelete.disabled = !entry || entry.source !== "custom";
+}
+
+async function deleteGlossaryEntry() {
+  const word = glossaryWord ? glossaryWord.value.trim().toLowerCase() : "";
+  if (!word || activeGlossarySource !== "custom") return;
+  if (typeof window.confirm === "function" && !window.confirm(`确定删除自定义词条“${word}”？删除前会自动备份。`)) return;
+  try {
+    const response = await fetch("/api/glossary", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ word }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    sentenceResults.clear();
+    await Promise.all([loadGlossaryEntries(), loadGlossaryBackups()]);
+    if (glossarySearch) glossarySearch.value = word;
+    renderGlossaryEntries(word);
+    const fallback = glossaryEntries.find((item) => item.word === word);
+    if (fallback) editGlossaryEntry(word);
+    else {
+      if (glossaryWord) glossaryWord.value = "";
+      if (glossaryPos) glossaryPos.value = "";
+      if (glossaryZh) glossaryZh.value = "";
+      if (glossaryNote) glossaryNote.value = "";
+      activeGlossarySource = null;
+      if (glossaryDelete) glossaryDelete.disabled = true;
+    }
+    if (glossaryMessage) glossaryMessage.textContent = data.reverted_to_builtin
+      ? `已删除“${word}”的自定义覆盖，当前恢复为内置释义。`
+      : `已删除自定义词条“${word}”。`;
+  } catch (error) {
+    if (glossaryMessage) {
+      glossaryMessage.classList.add("is-error");
+      glossaryMessage.textContent = `删除词条失败：${String(error)}`;
+    }
   }
 }
 
@@ -1188,11 +1650,13 @@ async function submitGlossaryEntry(event) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     sentenceResults.clear();
-    await loadGlossaryEntries();
+    await Promise.all([loadGlossaryEntries(), loadGlossaryBackups()]);
     if (glossarySearch) glossarySearch.value = data.entry.word;
     renderGlossaryEntries(data.entry.word);
+    activeGlossarySource = "custom";
+    if (glossaryDelete) glossaryDelete.disabled = false;
     if (glossaryMessage) glossaryMessage.textContent = `已保存“${data.entry.word}”，当前句的翻译与术语会重新解析。`;
-    if (selectedTarget && panelPosition !== "off") {
+    if (selectedTarget) {
       const requestId = ++requestSerial;
       renderLoadingPanel(selectedTarget);
       loadAndRender(selectedTarget, requestId, true);
@@ -1354,11 +1818,6 @@ function selectSentence(target) {
   clearPreview();
   selectedTarget = target;
   addClassToSpans(target, "is-selected");
-  if (panelPosition === "off") {
-    requestSerial++;
-    setPanelCollapsed(true);
-    return;
-  }
   setPanelCollapsed(false);
   const requestId = ++requestSerial;
   renderLoadingPanel(target);
@@ -1392,12 +1851,12 @@ async function loadAndRender(target, requestId, force = false) {
       return;
     }
   }
-  if (requestId !== requestSerial || !selectedTarget || selectedTarget.key !== target.key || panelPosition === "off") return;
+  if (requestId !== requestSerial || !selectedTarget || selectedTarget.key !== target.key) return;
   renderAnalysisPanel(target, result);
 }
 
 function refreshSelectedAnalysis(loadIfMissing = true) {
-  if (!selectedTarget || panelPosition === "off") return;
+  if (!selectedTarget) return;
   const cached = sentenceResults.get(selectedTarget.text);
   if (cached) {
     renderAnalysisPanel(selectedTarget, cached);
@@ -1414,7 +1873,7 @@ function renderEmptyPanel() {
   analysisContent.innerHTML = `<div class="panel-empty">
     <span class="panel-empty-icon">↗</span>
     <h3>从 PDF 中选择一句话</h3>
-    <p>悬停查看句子范围，单击锁定分析。面板位置、主题和解析程度可在“设置”中调整。</p>
+    <p>悬停查看句子范围，单击锁定分析。解析方式和面板位置可在分析栏顶部直接调整。</p>
   </div>`;
 }
 
@@ -1518,6 +1977,7 @@ function bracketRelationLabel(clause) {
     cause: "原因从句",
     purpose: "目的从句",
     result: "结果从句",
+    basis: "依据要求",
     relative: "定语从句",
     content: "内容从句",
     complement: "补语从句",
@@ -1682,8 +2142,41 @@ function renderAnalysisPanel(target, result) {
   const structureHtml = concise ? "" : structureView === "linked"
     ? renderLinkedStructure(result.text || target.text, result.clauses, main, childrenByParent, detailed)
     : renderBracketStructure(result.clauses, main, childrenByParent, detailed);
+  const clickableTranslation = (text) => {
+    const terms = [
+      ...(Array.isArray(result.terms) ? result.terms : []),
+      ...(Array.isArray(result.complex_words) ? result.complex_words : []),
+    ];
+    const candidates = [];
+    for (const term of terms) {
+      for (const display of [term.word, term.lemma]) {
+        const value = String(display || "").trim();
+        const translation = String(term.zh || "").split(/[；，、/]/, 1)[0].trim();
+        if (value.length >= 2 && translation) candidates.push({ value, word: term.word, translation });
+      }
+    }
+    candidates.sort((a, b) => b.value.length - a.value.length);
+    let cursor = 0;
+    let html = "";
+    const source = String(text || "");
+    while (cursor < source.length) {
+      let match = null;
+      for (const candidate of candidates) {
+        const index = source.toLowerCase().indexOf(candidate.value.toLowerCase(), cursor);
+        if (index < 0 || (match && index > match.index)) continue;
+        if (!match || index < match.index || candidate.value.length > match.candidate.value.length) match = { index, candidate };
+      }
+      if (!match) { html += esc(source.slice(cursor)); break; }
+      html += esc(source.slice(cursor, match.index));
+      const end = match.index + match.candidate.value.length;
+      const original = source.slice(match.index, end);
+      html += `<button class="translation-term" type="button" data-term-original="${esc(original)}" data-term-translation="${esc(match.candidate.translation)}" aria-label="将 ${esc(original)} 替换为中文释义 ${esc(match.candidate.translation)}">${esc(original)}</button>`;
+      cursor = end;
+    }
+    return html || esc(source);
+  };
   const translationClauses = detailed && result.translation && Array.isArray(result.translation.clauses)
-    ? `<ol class="translation-clauses">${result.translation.clauses.map((item) => `<li><span>${esc(item.text)}</span></li>`).join("")}</ol>`
+    ? `<ol class="translation-clauses">${result.translation.clauses.map((item) => `<li>${item.label ? `<strong>${esc(item.label)}：</strong>` : ""}<span>${clickableTranslation(item.text)}</span></li>`).join("")}</ol>`
     : "";
   const translationWarnings = detailed && result.translation && Array.isArray(result.translation.warnings)
     ? result.translation.warnings.map((warning) => `<div class="translation-warning">${esc(warning)}</div>`).join("")
@@ -1691,7 +2184,7 @@ function renderAnalysisPanel(target, result) {
   const translationHtml = result.translation && result.translation.text
     ? `<section class="analysis-section translation-section"><h3 class="section-heading">中文翻译</h3><div class="translation-card">
         <div class="translation-meta">${esc(result.translation.label || result.translation.engine || "本地翻译")}</div>
-        <p class="translation-text">${esc(result.translation.text)}</p>${translationClauses}${translationWarnings}
+        <p class="translation-text">${clickableTranslation(result.translation.text)}</p>${translationClauses}${translationWarnings}
       </div></section>`
     : "";
   const skeleton = grammarRows(main.grammar, true);
@@ -1700,29 +2193,50 @@ function renderAnalysisPanel(target, result) {
     : "";
   const termsHtml = Array.isArray(result.terms) && result.terms.length
     ? `<ul class="term-list">${result.terms.map((term) => `<li class="term-item">
-        <span class="term-word">${esc(term.word)}</span><span class="term-pos">${esc(term.pos || "")}</span><span class="term-zh">${esc(term.zh || "")}</span>
+        <button class="term-word term-open" type="button" data-glossary-word="${esc(term.word)}">${esc(term.word)}</button><span class="term-pos">${esc(term.pos || "")}</span><span class="term-zh">${esc(term.zh || "")}</span>
         ${detailed && term.note ? `<span class="term-note">${esc(term.note)}</span>` : ""}
       </li>`).join("")}</ul>`
     : `<div class="empty-copy">本句没有命中已收录术语</div>`;
+  const complexWordsHtml = Array.isArray(result.complex_words) && result.complex_words.length
+    ? `<div class="complex-word-list">${result.complex_words.map((word) => `<article class="complex-word-item">
+        <div><strong>${esc(word.word)}</strong><span>${esc(word.level || "较难")}</span></div>
+        <p>${esc(word.zh || "待补充释义")}</p>${detailed && word.note ? `<small>${esc(word.note)}</small>` : ""}
+      </article>`).join("")}</div>`
+    : "";
   const parserWarnings = detailed ? (result.warnings || []) : [];
   const globalWarnings = [...(target.contextWarnings || []), ...parserWarnings]
     .map((warning) => `<div class="global-warning">${esc(warning)}</div>`).join("");
   const engineName = result.engine === "spacy" ? "spaCy 本地解析" : "规则降级解析";
   const structureLabel = structureView === "linked" ? "原文联动树" : "嵌套原文";
   const logicSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">逻辑结构 · ${structureLabel}</h3>${structureHtml}</section>`;
-  const termsSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">复杂词 / 术语</h3>${termsHtml}</section>`;
+  const termsSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">复杂词</h3>${complexWordsHtml || '<div class="empty-copy">本句没有识别到较难的通用单词</div>'}<h3 class="section-heading term-heading">术语</h3>${termsHtml}</section>`;
   const conciseCore = concise ? `<section class="analysis-section concise-core"><h3 class="section-heading">核心命题</h3><div class="core-card">${esc(main.text)}</div></section>` : "";
 
   analysisContent.innerHTML = `<div class="sentence-meta">
       <span>${targetLocationText(target)}</span>
       <span class="meta-badges"><span class="depth-badge">${depthText(depth)}</span><span class="engine-badge">${engineName}</span></span>
     </div>
-    <div class="source-card"><p class="source-text" id="panel-source-text">${esc(result.text || target.text)}</p></div>
+    <div class="source-card"><p class="source-text" id="panel-source-text">${esc(result.text || target.text)}</p><div class="source-context-hint">右击原文中的英文单词，可加入复杂词表</div></div>
     ${translationHtml}${conciseCore}${logicSection}
     <section class="analysis-section"><h3 class="section-heading">主句主干</h3><div class="skeleton-card">${skeleton}${skeletonExtra}</div></section>
     ${termsSection}${globalWarnings}`;
 
+  for (const termButton of analysisContent.querySelectorAll(".translation-term[data-term-translation]")) {
+    termButton.addEventListener("click", () => toggleTranslationTerm(termButton));
+  }
+  for (const termButton of analysisContent.querySelectorAll(".term-open[data-glossary-word]")) {
+    termButton.addEventListener("click", () => openGlossary(termButton.dataset.glossaryWord));
+  }
+
   const sourceElement = document.getElementById("panel-source-text");
+  if (sourceElement) {
+    sourceElement.addEventListener("contextmenu", (event) => {
+      const word = sourceWordFromContextEvent(event, sourceElement);
+      if (!word) return;
+      event.preventDefault();
+      openComplexWords(word);
+    });
+  }
   if (sourceElement && !concise) {
     const interactiveItems = Array.from(analysisContent.querySelectorAll(".clause-interactive[data-clause-id]"));
     const focusLabel = document.getElementById("clause-focus-label");
@@ -1759,49 +2273,32 @@ function renderAnalysisPanel(target, result) {
   }
 }
 
-/* ---------------- 分析栏开关、停靠与尺寸 ---------------- */
-
-function isHorizontalPanel() {
-  return panelPosition === "left" || panelPosition === "right";
+function toggleTranslationTerm(button) {
+  if (!button || !button.dataset || !button.dataset.termTranslation) return false;
+  const translated = button.classList.toggle("is-translated");
+  button.textContent = translated ? button.dataset.termTranslation : button.dataset.termOriginal;
+  button.setAttribute("aria-pressed", String(translated));
+  return translated;
 }
 
+/* ---------------- 右侧分析栏开关与宽度 ---------------- */
+
 function updatePanelControls() {
-  const disabled = panelPosition === "off";
   if (panelToggle) {
-    panelToggle.disabled = disabled;
-    panelToggle.setAttribute("aria-expanded", String(!panelCollapsed && !disabled));
-    panelToggle.textContent = disabled ? "分析已关闭" : (panelCollapsed ? "展开分析" : "收起分析");
+    panelToggle.disabled = false;
+    panelToggle.setAttribute("aria-expanded", String(!panelCollapsed));
+    panelToggle.textContent = panelCollapsed ? "展开分析" : "收起分析";
   }
   if (panelResizer) {
-    const vertical = isHorizontalPanel();
-    panelResizer.setAttribute("aria-orientation", vertical ? "vertical" : "horizontal");
-    panelResizer.setAttribute("aria-label", vertical ? "调整分析栏宽度" : "调整分析栏高度");
+    panelResizer.setAttribute("aria-orientation", "vertical");
+    panelResizer.setAttribute("aria-label", "调整分析栏宽度");
   }
 }
 
 function setPanelCollapsed(collapsed) {
-  panelCollapsed = !!collapsed || panelPosition === "off";
+  panelCollapsed = !!collapsed;
   workspace.classList.toggle("panel-collapsed", panelCollapsed);
   updatePanelControls();
-}
-
-function setPanelPosition(position, persist = true, openAfterChange = true) {
-  const next = VALID_POSITIONS.has(position) ? position : DEFAULT_SETTINGS.panelPosition;
-  panelPosition = next;
-  uiSettings.panelPosition = next;
-  if (workspace && workspace.dataset) workspace.dataset.panelPosition = next;
-  if (positionSelect) positionSelect.value = next;
-  if (next === "off") {
-    requestSerial++;
-    setPanelCollapsed(true);
-  } else if (openAfterChange) {
-    setPanelCollapsed(false);
-    refreshSelectedAnalysis(true);
-  } else {
-    setPanelCollapsed(panelCollapsed);
-  }
-  updatePanelControls();
-  if (persist) saveSettings();
 }
 
 function closeAnalysisPanel() {
@@ -1816,14 +2313,12 @@ function cssNumber(name, fallback) {
 }
 
 function panelWidth() { return cssNumber("--panel-width", 440); }
-function panelHeight() { return cssNumber("--panel-height", 340); }
 function clampPanelWidth(width) { return Math.max(340, Math.min(620, Math.round(width))); }
-function clampPanelHeight(height) { return Math.max(220, Math.min(560, Math.round(height))); }
 
 function setPanelWidth(width, persist = false) {
   const clamped = clampPanelWidth(width);
   document.documentElement.style.setProperty("--panel-width", `${clamped}px`);
-  if (panelResizer && isHorizontalPanel()) {
+  if (panelResizer) {
     panelResizer.setAttribute("aria-valuemin", "340");
     panelResizer.setAttribute("aria-valuemax", "620");
     panelResizer.setAttribute("aria-valuenow", String(clamped));
@@ -1833,29 +2328,12 @@ function setPanelWidth(width, persist = false) {
   }
 }
 
-function setPanelHeight(height, persist = false) {
-  const clamped = clampPanelHeight(height);
-  document.documentElement.style.setProperty("--panel-height", `${clamped}px`);
-  if (panelResizer && !isHorizontalPanel()) {
-    panelResizer.setAttribute("aria-valuemin", "220");
-    panelResizer.setAttribute("aria-valuemax", "560");
-    panelResizer.setAttribute("aria-valuenow", String(clamped));
-  }
-  if (persist && window.localStorage) {
-    try { window.localStorage.setItem("parse-spec:panel-height", String(clamped)); } catch (_ignored) {}
-  }
-}
-
-function restorePanelSize() {
+function restorePanelWidth() {
   try {
     const savedWidth = window.localStorage && Number(window.localStorage.getItem("parse-spec:panel-width"));
-    const savedHeight = window.localStorage && Number(window.localStorage.getItem("parse-spec:panel-height"));
     if (savedWidth) setPanelWidth(savedWidth);
-    if (savedHeight) setPanelHeight(savedHeight);
   } catch (_ignored) {}
 }
-
-function restorePanelWidth() { restorePanelSize(); }
 
 function isNarrowViewport() {
   return !!(window.matchMedia && window.matchMedia("(max-width: 760px)").matches);
@@ -1863,46 +2341,27 @@ function isNarrowViewport() {
 
 function applyPanelOverlaySize(state) {
   if (!state || !state.panel) return;
-  const horizontal = state.position === "left" || state.position === "right";
-  if (horizontal) {
-    const width = state.pendingWidth;
-    const left = state.position === "right" ? state.panelRect.right - width : state.panelRect.left;
-    state.panel.style.left = `${left}px`;
-    state.panel.style.top = `${state.panelRect.top}px`;
-    state.panel.style.width = `${width}px`;
-    state.panel.style.height = `${state.panelRect.height}px`;
-    state.resizer.style.left = `${state.position === "right" ? left - state.resizerRect.width : left + width}px`;
-    state.resizer.style.top = `${state.panelRect.top}px`;
-    state.resizer.style.width = `${state.resizerRect.width || 7}px`;
-    state.resizer.style.height = `${state.panelRect.height}px`;
-  } else {
-    const height = state.pendingHeight;
-    const top = state.position === "bottom" ? state.panelRect.bottom - height : state.panelRect.top;
-    state.panel.style.left = `${state.panelRect.left}px`;
-    state.panel.style.top = `${top}px`;
-    state.panel.style.width = `${state.panelRect.width}px`;
-    state.panel.style.height = `${height}px`;
-    state.resizer.style.left = `${state.panelRect.left}px`;
-    state.resizer.style.top = `${state.position === "bottom" ? top - state.resizerRect.height : top + height}px`;
-    state.resizer.style.width = `${state.panelRect.width}px`;
-    state.resizer.style.height = `${state.resizerRect.height || 7}px`;
-  }
+  const width = state.pendingWidth;
+  const left = state.panelRect.right - width;
+  state.panel.style.left = `${left}px`;
+  state.panel.style.top = `${state.panelRect.top}px`;
+  state.panel.style.width = `${width}px`;
+  state.panel.style.height = `${state.panelRect.height}px`;
+  state.resizer.style.left = `${left - state.resizerRect.width}px`;
+  state.resizer.style.top = `${state.panelRect.top}px`;
+  state.resizer.style.width = `${state.resizerRect.width || 7}px`;
+  state.resizer.style.height = `${state.panelRect.height}px`;
 }
 
 function startResize(event) {
-  if (isNarrowViewport() || panelPosition === "off" || !analysisPanel) return;
+  if (isNarrowViewport() || !analysisPanel) return;
   const width = panelWidth();
-  const height = panelHeight();
   resizeStart = {
     x: Number(event.clientX) || 0,
-    y: Number(event.clientY) || 0,
     width,
-    height,
     pendingWidth: width,
-    pendingHeight: height,
-    position: panelPosition,
     panel: analysisPanel,
-    panelRect: measuredRect(analysisPanel, width, height),
+    panelRect: measuredRect(analysisPanel, width, 0),
     resizer: panelResizer,
     resizerRect: measuredRect(panelResizer, 7, 7),
   };
@@ -1911,20 +2370,14 @@ function startResize(event) {
   panelResizer.classList.add("is-live-resizing");
   applyPanelOverlaySize(resizeStart);
   panelResizer.classList.add("is-dragging");
-  document.body.classList.add(isHorizontalPanel() ? "is-resizing-x" : "is-resizing-y");
+  document.body.classList.add("is-resizing-x");
   if (event.preventDefault) event.preventDefault();
   if (panelResizer.setPointerCapture && event.pointerId !== undefined) panelResizer.setPointerCapture(event.pointerId);
 }
 
 function moveResize(event) {
   if (!resizeStart) return;
-  if (resizeStart.position === "right" || resizeStart.position === "left") {
-    const direction = resizeStart.position === "right" ? -1 : 1;
-    resizeStart.pendingWidth = clampPanelWidth(resizeStart.width + direction * ((Number(event.clientX) || 0) - resizeStart.x));
-  } else {
-    const direction = resizeStart.position === "bottom" ? -1 : 1;
-    resizeStart.pendingHeight = clampPanelHeight(resizeStart.height + direction * ((Number(event.clientY) || 0) - resizeStart.y));
-  }
+  resizeStart.pendingWidth = clampPanelWidth(resizeStart.width - ((Number(event.clientX) || 0) - resizeStart.x));
   applyPanelOverlaySize(resizeStart);
   if (event.preventDefault) event.preventDefault();
 }
@@ -1932,11 +2385,9 @@ function moveResize(event) {
 function endResize() {
   if (!resizeStart) return;
   const state = resizeStart;
-  const horizontal = state.position === "left" || state.position === "right";
   resizeStart = null;
   applyPanelOverlaySize(state);
-  if (horizontal) setPanelWidth(state.pendingWidth, true);
-  else setPanelHeight(state.pendingHeight, true);
+  setPanelWidth(state.pendingWidth, true);
   panelResizer.classList.remove("is-dragging");
   document.body.classList.remove("is-resizing-x");
   document.body.classList.remove("is-resizing-y");
@@ -1944,25 +2395,14 @@ function endResize() {
 }
 
 function resizeByKeyboard(event) {
-  if (panelPosition === "off") return;
   const step = 16;
-  if (panelPosition === "right" && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
     event.preventDefault();
     setPanelWidth(panelWidth() + (event.key === "ArrowLeft" ? step : -step), true);
-  } else if (panelPosition === "left" && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
-    event.preventDefault();
-    setPanelWidth(panelWidth() + (event.key === "ArrowRight" ? step : -step), true);
-  } else if (panelPosition === "bottom" && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
-    event.preventDefault();
-    setPanelHeight(panelHeight() + (event.key === "ArrowUp" ? step : -step), true);
-  } else if (panelPosition === "top" && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
-    event.preventDefault();
-    setPanelHeight(panelHeight() + (event.key === "ArrowDown" ? step : -step), true);
   }
 }
 
 if (panelToggle) panelToggle.addEventListener("click", () => {
-  if (panelPosition === "off") return;
   if (panelCollapsed) {
     setPanelCollapsed(false);
     refreshSelectedAnalysis(true);
@@ -1982,16 +2422,14 @@ window.addEventListener("pointerup", () => { endResize(); endNavResize(); });
 window.addEventListener("pointercancel", () => { endResize(); endNavResize(); });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    if (glossaryDialog && !glossaryDialog.hidden) closeGlossary();
+    if (complexWordDialog && !complexWordDialog.hidden) closeComplexWords();
+    else if (glossaryDialog && !glossaryDialog.hidden) closeGlossary();
     else if ((outlinePanel && !outlinePanel.hidden) || (bookmarkPanel && !bookmarkPanel.hidden)) setNavigationPanel(null);
     else if (recentDocsMenu && !recentDocsMenu.hidden) closeRecentDocuments();
-    else if (settingsPopover && !settingsPopover.hidden) closeSettings();
-    else if (selectedTarget || (!panelCollapsed && panelPosition !== "off")) closeAnalysisPanel();
+    else if (selectedTarget || !panelCollapsed) closeAnalysisPanel();
   }
 });
 
-if (settingsToggle) settingsToggle.addEventListener("click", (event) => { if (event.stopPropagation) event.stopPropagation(); toggleSettings(); });
-if (settingsClose) settingsClose.addEventListener("click", closeSettings);
 if (themeCycle) themeCycle.addEventListener("click", cycleTheme);
 if (docMeta) docMeta.addEventListener("click", (event) => {
   if (event.stopPropagation) event.stopPropagation();
@@ -2001,10 +2439,8 @@ if (recentDocsList) recentDocsList.addEventListener("click", (event) => {
   const button = event.target && event.target.closest ? event.target.closest("[data-recent-key]") : null;
   if (button) switchRecentDocument(button.dataset.recentKey);
 });
-if (depthSelect) depthSelect.addEventListener("change", (event) => setAnalysisDepth(event.target.value));
-if (structureSelect) structureSelect.addEventListener("change", (event) => setStructureView(event.target.value));
-if (positionSelect) positionSelect.addEventListener("change", (event) => setPanelPosition(event.target.value));
-if (settingsReset) settingsReset.addEventListener("click", resetSettings);
+for (const button of depthButtons) button.addEventListener("click", () => setAnalysisDepth(button.dataset.analysisDepth));
+for (const button of structureButtons) button.addEventListener("click", () => setStructureView(button.dataset.structureView));
 if (outlineToggle) outlineToggle.addEventListener("click", (event) => {
   if (event.stopPropagation) event.stopPropagation();
   setOutlineOpen(!outlinePanel || outlinePanel.hidden);
@@ -2016,14 +2452,27 @@ if (bookmarkToggle) bookmarkToggle.addEventListener("click", (event) => {
 });
 if (bookmarkClose) bookmarkClose.addEventListener("click", () => setBookmarksOpen(false));
 if (bookmarkAdd) bookmarkAdd.addEventListener("click", addBookmark);
+if (bookmarkName) bookmarkName.addEventListener("keydown", (event) => { if (event.key === "Enter") addBookmark(); });
 if (bookmarkContent) bookmarkContent.addEventListener("click", (event) => {
   const button = event.target && event.target.closest ? event.target.closest("[data-bookmark-action]") : null;
   if (!button) return;
   const id = button.dataset.bookmarkId;
   if (button.dataset.bookmarkAction === "remove") removeBookmark(id);
+  else if (button.dataset.bookmarkAction === "rename") renameBookmark(id);
   else if (button.dataset.bookmarkAction === "jump") jumpToBookmark(documentBookmarks().find((bookmark) => bookmark.id === id));
 });
-if (glossaryToggle) glossaryToggle.addEventListener("click", openGlossary);
+if (complexWordToggle) complexWordToggle.addEventListener("click", () => openComplexWords());
+if (complexWordClose) complexWordClose.addEventListener("click", closeComplexWords);
+if (complexWordSearch) complexWordSearch.addEventListener("input", (event) => renderComplexWordEntries(event.target.value));
+if (complexWordList) complexWordList.addEventListener("click", (event) => {
+  const entry = event.target && event.target.closest ? event.target.closest("[data-complex-word]") : null;
+  if (entry) editComplexWord(entry.dataset.complexWord);
+});
+if (complexWordForm) complexWordForm.addEventListener("submit", submitComplexWord);
+if (complexWordWord) complexWordWord.addEventListener("input", syncComplexWordDeleteState);
+if (complexWordDelete) complexWordDelete.addEventListener("click", deleteComplexWord);
+if (complexWordDialog) complexWordDialog.addEventListener("click", (event) => { if (event.target === complexWordDialog) closeComplexWords(); });
+if (glossaryToggle) glossaryToggle.addEventListener("click", () => openGlossary());
 if (glossaryClose) glossaryClose.addEventListener("click", closeGlossary);
 if (glossarySearch) glossarySearch.addEventListener("input", (event) => renderGlossaryEntries(event.target.value));
 if (glossaryList) glossaryList.addEventListener("click", (event) => {
@@ -2031,11 +2480,27 @@ if (glossaryList) glossaryList.addEventListener("click", (event) => {
   if (entry) editGlossaryEntry(entry.dataset.glossaryWord);
 });
 if (glossaryForm) glossaryForm.addEventListener("submit", submitGlossaryEntry);
+if (glossaryWord) glossaryWord.addEventListener("input", syncGlossaryDeleteState);
+if (glossaryDelete) glossaryDelete.addEventListener("click", deleteGlossaryEntry);
+if (glossaryBackupCreate) glossaryBackupCreate.addEventListener("click", createGlossaryBackup);
+if (glossaryBackupRestore) glossaryBackupRestore.addEventListener("click", restoreGlossaryBackup);
+if (glossaryBackupDownload) glossaryBackupDownload.addEventListener("click", downloadGlossaryBackup);
+if (glossaryBackupDelete) glossaryBackupDelete.addEventListener("click", deleteGlossaryBackup);
 if (glossaryDialog) glossaryDialog.addEventListener("click", (event) => { if (event.target === glossaryDialog) closeGlossary(); });
+if (zoomOut) zoomOut.addEventListener("click", () => setPdfZoom(pdfZoom - .1));
+if (zoomReset) zoomReset.addEventListener("click", () => setPdfZoom(1));
+if (zoomIn) zoomIn.addEventListener("click", () => setPdfZoom(pdfZoom + .1));
+if (documentPane) {
+  documentPane.addEventListener("scroll", schedulePageStatusUpdate, { passive: true });
+  documentPane.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    const delta = Math.max(-80, Math.min(80, Number(event.deltaY) || 0));
+    setPdfZoom(pdfZoom - delta * .0015);
+  }, { passive: false });
+}
 document.addEventListener("click", (event) => {
   if (recentDocsMenu && !recentDocsMenu.hidden && recentDocs && !recentDocs.contains(event.target)) closeRecentDocuments();
-  if (settingsPopover && !settingsPopover.hidden && settingsToggle
-      && !settingsPopover.contains(event.target) && !settingsToggle.contains(event.target)) closeSettings();
 });
 
 /* ---------------- 文件加载 ---------------- */
@@ -2054,6 +2519,7 @@ async function openPdf(file) {
   }
   activeLoadingTask = null;
   currentPdf = null;
+  updatePageStatus();
   pagesEl.innerHTML = "";
   placeholder.hidden = true;
   sentenceResults.clear();
@@ -2064,7 +2530,7 @@ async function openPdf(file) {
   bookmarkCache = [];
   clearPreview();
   clearSelection();
-  setPanelCollapsed(panelPosition === "off" || isNarrowViewport());
+  setPanelCollapsed(isNarrowViewport());
   setNavigationPanel(null);
   setOutlineStatus("正在读取 PDF…");
   try {
@@ -2079,20 +2545,24 @@ async function openPdf(file) {
     }
     activeLoadingTask = null;
     currentPdf = pdf;
+    updatePageStatus();
     const documentSentenceState = { nextId: 0, pending: null };
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
       await renderPage(pdf, pageNum, pagesEl, documentSentenceState);
       if (loadId !== documentLoadSerial || pdf !== currentPdf) return;
       setDocumentLabel(file, `正在加载 ${pageNum}/${pdf.numPages} 页`);
+      updatePageStatus();
       if (pageNum < pdf.numPages) await yieldToBrowser();
     }
     finalizeDocumentSentences(documentSentenceState);
     setDocumentLabel(file);
+    updatePageStatus();
     await loadPdfOutline(pdf, loadId);
   } catch (error) {
     if (loadId !== documentLoadSerial) return;
     activeLoadingTask = null;
     currentPdf = null;
+    updatePageStatus();
     placeholder.hidden = false;
     placeholder.innerHTML = `<span class="placeholder-mark">!</span><h1>PDF 加载失败</h1><p>${esc(String(error))}</p>`;
     setDocumentLabel(file, "加载失败");
@@ -2111,11 +2581,11 @@ function bindFileInput(input) {
 bindFileInput(fileInput);
 bindFileInput(emptyFileInput);
 setTheme(uiSettings.theme, false);
-syncSettingsControls();
-restorePanelSize();
+syncAnalysisControls();
+restorePanelWidth();
 restoreOutlineWidth();
-setPanelPosition(uiSettings.panelPosition, false, false);
-setPanelCollapsed(panelPosition === "off" || isNarrowViewport());
+restorePdfZoom();
+setPanelCollapsed(isNarrowViewport());
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => (

@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from parse.clauser import parse_sentence, split_sentences
 from parse.glossary import Glossary
-from parse.translator import translate_text
+from parse.complex_words import ComplexWordTable, extract_complex_words
+from parse.translator import translate_sentence, translate_text
 import parse.spacy_parser as spacy_parser
 import server
 
@@ -111,6 +112,36 @@ class SentenceParserTests(unittest.TestCase):
         self.assertEqual(parsed.engine, "rule-fallback")
         self.assertIn("RuntimeError", parsed.warnings[0])
 
+    def test_timing_parameter_coordination_keeps_parallel_main_predicates(self):
+        source = (
+            "The t_phy_wrcsgap timing parameter specifies the minimum number of additional Data clocks "
+            "required between commands when changing the target chip select driven on the dfi_wrdata_cs "
+            "signal and defines a minimum additional delay between commands when changing the target chip "
+            "select as required by the PHY."
+        )
+        parsed = parse_sentence(source)
+        main = next(clause for clause in parsed.clauses if clause.id == parsed.main_clause_id)
+        time_clauses = [clause for clause in parsed.clauses if clause.relation == "time"]
+        basis = next(clause for clause in parsed.clauses if clause.relation == "basis")
+        self.assertIn("timing parameter specifies", main.text)
+        self.assertIn("and defines", main.text)
+        self.assertEqual(len(time_clauses), 2)
+        self.assertEqual(time_clauses[1].parent_id, main.id)
+        self.assertEqual(basis.parent_id, time_clauses[1].id)
+        self.assertEqual(basis.grammar.voice, "passive")
+
+        translated = translate_sentence(parsed, Glossary())
+        self.assertIn("t_phy_wrcsgap 时序参数", translated["text"])
+        self.assertIn("最少附加数据时钟数", translated["text"])
+        self.assertEqual([item["label"] for item in translated["clauses"]], ["第一项规定", "并列规定"])
+
+    def test_complex_words_are_single_reading_words_not_phrases(self):
+        hits = extract_complex_words("To ensure that updates do not interfere with other signals.", ComplexWordTable())
+        by_lemma = {item["lemma"]: item for item in hits}
+        self.assertEqual(by_lemma["ensure"]["zh"], "确保")
+        self.assertEqual(by_lemma["interfere"]["zh"], "干扰；妨碍")
+        self.assertTrue(all(" " not in item["word"] for item in hits))
+
 
 class GlossaryTests(unittest.TestCase):
     def test_variant_and_user_override(self):
@@ -131,6 +162,17 @@ class GlossaryTests(unittest.TestCase):
         self.assertIn("不得", translated)
         self.assertIn("MR28", translated)
         self.assertIn("OP[5]", translated)
+
+    def test_update_sentence_translation_keeps_clickable_hard_words_in_readable_order(self):
+        translated = translate_text(
+            "To ensure that updates do not interfere with signals on the DRAM interface, "
+            "the DFI supports update modes when the DFI bus is placed in an idle state.",
+            Glossary(),
+        )
+        self.assertIn("为 ensure", translated)
+        self.assertIn("发生 interfere", translated)
+        self.assertIn("DRAM 接口上的信号", translated)
+        self.assertIn("DFI 总线处于空闲状态", translated)
 
 
 class ApiTests(unittest.TestCase):
@@ -168,6 +210,7 @@ class ApiTests(unittest.TestCase):
                 "main_clause_id",
                 "clauses",
                 "terms",
+                "complex_words",
                 "translation",
                 "warnings",
             },
@@ -248,11 +291,13 @@ class ApiTests(unittest.TestCase):
 
     def test_glossary_api_lists_and_saves_user_entries(self):
         old_path = server._glossary_path
+        old_backup_dir = server._glossary_backup_dir
         old_glossary = server._glossary
         old_signature = server._glossary_signature
         try:
             with tempfile.TemporaryDirectory() as directory:
                 server._glossary_path = Path(directory) / "glossary.json"
+                server._glossary_backup_dir = Path(directory) / "backups"
                 server._glossary_signature = None
                 listed = self.client.get("/api/glossary")
                 self.assertEqual(listed.status_code, 200)
@@ -270,10 +315,89 @@ class ApiTests(unittest.TestCase):
                 listed_again = self.client.get("/api/glossary").get_json()["entries"]
                 frequency = next(entry for entry in listed_again if entry["word"] == "frequency")
                 self.assertEqual(frequency["source"], "custom")
+
+                deleted = self.client.delete("/api/glossary", json={"word": "frequency"})
+                self.assertEqual(deleted.status_code, 200)
+                self.assertNotIn("frequency", json.loads(server._glossary_path.read_text(encoding="utf-8")))
         finally:
             server._glossary_path = old_path
+            server._glossary_backup_dir = old_backup_dir
             server._glossary = old_glossary
             server._glossary_signature = old_signature
+            server._analyze_sentence.cache_clear()
+
+    def test_glossary_backup_and_restore_round_trip(self):
+        old_path = server._glossary_path
+        old_backup_dir = server._glossary_backup_dir
+        old_glossary = server._glossary
+        old_signature = server._glossary_signature
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                server._glossary_path = Path(directory) / "glossary.json"
+                server._glossary_backup_dir = Path(directory) / "backups"
+                server._glossary_path.write_text(
+                    json.dumps({"latency": {"pos": "n.", "zh": "延迟", "note": ""}}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                created = self.client.post("/api/glossary/backups")
+                self.assertEqual(created.status_code, 200)
+                filename = created.get_json()["backup"]["filename"]
+                self.assertEqual(created.get_json()["backup"]["entry_count"], 1)
+
+                server._glossary_path.write_text("{}\n", encoding="utf-8")
+                restored = self.client.post("/api/glossary/restore", json={"filename": filename})
+                self.assertEqual(restored.status_code, 200)
+                self.assertEqual(json.loads(server._glossary_path.read_text(encoding="utf-8"))["latency"]["zh"], "延迟")
+
+                deleted = self.client.delete(f"/api/glossary/backups/{filename}")
+                self.assertEqual(deleted.status_code, 200)
+                self.assertFalse((server._glossary_backup_dir / filename).exists())
+        finally:
+            server._glossary_path = old_path
+            server._glossary_backup_dir = old_backup_dir
+            server._glossary = old_glossary
+            server._glossary_signature = old_signature
+            server._analyze_sentence.cache_clear()
+
+    def test_complex_word_table_crud_and_analysis_refresh(self):
+        old_path = server._complex_words_path
+        old_table = server._complex_words
+        old_signature = server._complex_words_signature
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                server._complex_words_path = Path(directory) / "complex_words.json"
+                server._complex_words = ComplexWordTable(server._complex_words_path)
+                server._complex_words_signature = None
+
+                listed = self.client.get("/api/complex-words")
+                self.assertEqual(listed.status_code, 200)
+                self.assertTrue(any(entry["word"] == "ensure" for entry in listed.get_json()["entries"]))
+
+                suggested = self.client.get("/api/complex-words/suggest", query_string={"word": "latency"})
+                self.assertEqual(suggested.status_code, 200)
+                self.assertEqual(suggested.get_json()["suggestion"]["zh"], "延迟")
+                missing = self.client.get("/api/complex-words/suggest", query_string={"word": "zzzzunknown"})
+                self.assertEqual(missing.status_code, 404)
+
+                saved = self.client.post(
+                    "/api/complex-words",
+                    json={"word": "intricate", "zh": "复杂的", "level": "较难", "note": "结构复杂"},
+                )
+                self.assertEqual(saved.status_code, 200)
+                self.assertEqual(saved.get_json()["entry"]["source"], "custom")
+                analyzed = self.client.post("/api/analyze", json={"sentences": ["An intricate sequence is required."]})
+                hit = next(item for item in analyzed.get_json()["results"][0]["complex_words"] if item["lemma"] == "intricate")
+                self.assertEqual(hit["zh"], "复杂的")
+
+                rejected = self.client.post("/api/complex-words", json={"word": "two words", "zh": "两个词"})
+                self.assertEqual(rejected.status_code, 400)
+                deleted = self.client.delete("/api/complex-words", json={"word": "intricate"})
+                self.assertEqual(deleted.status_code, 200)
+                self.assertEqual(json.loads(server._complex_words_path.read_text(encoding="utf-8")), {})
+        finally:
+            server._complex_words_path = old_path
+            server._complex_words = old_table
+            server._complex_words_signature = old_signature
             server._analyze_sentence.cache_clear()
 
     def test_bookmark_api_reads_writes_and_removes_project_file_entries(self):
@@ -288,6 +412,7 @@ class ApiTests(unittest.TestCase):
 
                 bookmark = {
                     "id": "b1",
+                    "name": "校准时序要求",
                     "pageNum": 8,
                     "sentenceIndex": 2,
                     "text": "The controller waits.",
@@ -300,6 +425,7 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(saved.status_code, 200)
                 stored = json.loads(server._bookmarks_path.read_text(encoding="utf-8"))
                 self.assertEqual(stored[document_key][0]["pageNum"], 8)
+                self.assertEqual(stored[document_key][0]["name"], "校准时序要求")
 
                 invalid = self.client.post(
                     "/api/bookmarks",

@@ -13,7 +13,7 @@
 <header class="topbar">
   <div class="brand-group">
     <span class="brand">Parse-Spec</span>
-    <span class="sub">本地离线 · 阅读与拆解英文技术文档</span>
+    <span class="sub">阅读与拆解英文技术文档</span>
   </div>
   <div class="recent-docs" id="recent-docs">
     <button class="doc-meta" id="doc-meta" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="recent-docs-menu">尚未打开 PDF</button>
@@ -22,46 +22,9 @@
       <div id="recent-docs-list" class="recent-docs-list"><div class="recent-docs-empty">暂无最近文档</div></div>
     </section>
   </div>
-  <div class="settings-wrap">
-    <button class="icon-btn settings-toggle" id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings-popover">设置</button>
-    <section class="settings-popover" id="settings-popover" aria-label="阅读与解析设置" hidden>
-      <div class="settings-heading">
-        <div>
-        <div class="eyebrow">阅读设置</div>
-          <h2>设置</h2>
-        </div>
-        <button class="icon-btn settings-close" id="settings-close" type="button" aria-label="关闭设置">×</button>
-      </div>
-      <label class="setting-row" for="depth-select">
-        <span><strong>解析程度</strong><small>控制分析结果展示的信息密度</small></span>
-        <select id="depth-select">
-          <option value="concise">简洁</option>
-          <option value="standard">标准</option>
-          <option value="detailed">详细</option>
-        </select>
-      </label>
-      <label class="setting-row" for="structure-select">
-        <span><strong>逻辑结构展示</strong><small>在原文顺序与关系树之间切换</small></span>
-        <select id="structure-select">
-          <option value="bracket">嵌套原文</option>
-          <option value="linked">原文联动树</option>
-        </select>
-      </label>
-      <label class="setting-row" for="position-select">
-        <span><strong>分析栏位置</strong><small>内容会按可用空间自动重排</small></span>
-        <select id="position-select">
-          <option value="right">右侧</option>
-          <option value="left">左侧</option>
-          <option value="top">上侧</option>
-          <option value="bottom">下侧</option>
-          <option value="off">关闭</option>
-        </select>
-      </label>
-      <button class="settings-reset" id="settings-reset" type="button">恢复默认设置</button>
-    </section>
-  </div>
   <button class="icon-btn outline-toggle" id="outline-toggle" type="button" aria-expanded="false" aria-controls="outline-panel" aria-label="打开 PDF 目录">目录</button>
   <button class="icon-btn bookmark-toggle" id="bookmark-toggle" type="button" aria-expanded="false" aria-controls="bookmark-panel" aria-label="打开书签">书签</button>
+  <button class="icon-btn" id="complex-word-toggle" type="button" aria-expanded="false" aria-controls="complex-word-dialog">复杂词</button>
   <button class="icon-btn glossary-toggle" id="glossary-toggle" type="button" aria-expanded="false" aria-controls="glossary-dialog">术语表</button>
   <button class="icon-btn panel-toggle" id="panel-toggle" type="button" aria-expanded="true" aria-controls="analysis-panel">收起分析</button>
   <label class="btn filebtn">选择 PDF
@@ -69,7 +32,7 @@
   </label>
 </header>
 
-<main class="workspace" id="workspace" data-panel-position="right">
+<main class="workspace" id="workspace">
   <aside id="outline-panel" class="outline-panel" aria-label="PDF 目录" hidden>
     <header class="outline-header">
       <div><div class="eyebrow">文档导航</div><h2>目录</h2></div>
@@ -84,8 +47,11 @@
       <button class="icon-btn outline-close" id="bookmark-close" type="button" aria-label="关闭书签">×</button>
     </header>
     <div class="bookmark-actions">
-      <button class="btn bookmark-add" id="bookmark-add" type="button">＋ 添加当前位置</button>
-      <p>已选句子时记录句子，否则记录当前页。</p>
+      <div class="bookmark-create">
+        <input id="bookmark-name" type="text" maxlength="200" placeholder="书签名称（可选）" aria-label="自定义书签名称">
+        <button class="btn bookmark-add" id="bookmark-add" type="button">＋ 添加</button>
+      </div>
+      <p>已选句子时记录句子，否则记录当前页；添加后仍可重命名。</p>
     </div>
     <div class="outline-content bookmark-content" id="bookmark-content"><div class="outline-empty">打开 PDF 后可添加书签。</div></div>
   </aside>
@@ -114,20 +80,45 @@
       </div>
       <button id="panel-close" class="icon-btn close-btn" type="button" aria-label="收起分析栏">×</button>
     </header>
+    <div class="analysis-toolbar" aria-label="分析显示设置">
+      <div class="toolbar-setting">
+        <span class="toolbar-label">解析</span>
+        <div class="segmented-control" role="group" aria-label="解析程度">
+          <button id="depth-concise" type="button" data-analysis-depth="concise" aria-pressed="false">简洁</button>
+          <button id="depth-standard" type="button" data-analysis-depth="standard" aria-pressed="true">标准</button>
+          <button id="depth-detailed" type="button" data-analysis-depth="detailed" aria-pressed="false">详细</button>
+        </div>
+      </div>
+      <div class="toolbar-setting">
+        <span class="toolbar-label">结构</span>
+        <div class="segmented-control" role="group" aria-label="逻辑结构展示">
+          <button id="structure-bracket" type="button" data-structure-view="bracket" aria-pressed="true">嵌套原文</button>
+          <button id="structure-linked" type="button" data-structure-view="linked" aria-pressed="false">联动树</button>
+        </div>
+      </div>
+    </div>
     <div id="analysis-content" class="analysis-content" aria-live="polite">
       <div class="panel-empty">
         <span class="panel-empty-icon">↗</span>
         <h3>从 PDF 中选择一句话</h3>
-        <p>悬停查看句子范围，单击锁定分析。主题可在下栏切换，面板位置和解析程度可在“设置”中调整。</p>
+        <p>悬停查看句子范围，单击锁定分析。解析程度和结构展示可在上方直接切换。</p>
       </div>
     </div>
   </aside>
 </main>
 
 <footer class="bottom-bar" aria-label="快捷工具栏">
-  <button id="theme-cycle" class="bottom-icon-btn" type="button" aria-label="切换颜色主题" title="切换颜色主题">
-    <span id="theme-icon" aria-hidden="true">☀</span>
-  </button>
+  <div class="bottom-bar-left">
+    <button id="theme-cycle" class="bottom-icon-btn" type="button" aria-label="切换颜色主题" title="切换颜色主题">
+      <span id="theme-icon" aria-hidden="true">☀</span>
+    </button>
+  </div>
+  <div id="page-status" class="page-status" aria-live="polite">— / —</div>
+  <div class="zoom-controls" aria-label="PDF 缩放">
+    <button id="zoom-out" class="bottom-icon-btn" type="button" aria-label="缩小 PDF">−</button>
+    <button id="zoom-reset" class="zoom-value" type="button" aria-label="恢复 PDF 为 100%">100%</button>
+    <button id="zoom-in" class="bottom-icon-btn" type="button" aria-label="放大 PDF">＋</button>
+  </div>
 </footer>
 
 <section id="glossary-dialog" class="glossary-dialog" role="dialog" aria-modal="true" aria-labelledby="glossary-title" hidden>
@@ -144,12 +135,53 @@
       </section>
       <form id="glossary-form" class="glossary-form">
         <div><div class="eyebrow">新增或覆盖</div><h3>自定义术语</h3></div>
-        <label>英文词条<input id="glossary-word" name="word" required maxlength="120" placeholder="例如 frequency"></label>
-        <label>词性<input id="glossary-pos" name="pos" maxlength="40" placeholder="例如 n."></label>
-        <label>中文释义<input id="glossary-zh" name="zh" required maxlength="240" placeholder="例如 频率"></label>
-        <label>说明<textarea id="glossary-note" name="note" maxlength="800" rows="4" placeholder="可选：补充上下文或使用约束"></textarea></label>
+        <label class="glossary-field-word">英文词条<input id="glossary-word" name="word" required maxlength="120" placeholder="例如 frequency"></label>
+        <label class="glossary-field-pos">词性<input id="glossary-pos" name="pos" maxlength="40" placeholder="例如 n."></label>
+        <label class="glossary-field-zh">中文释义<input id="glossary-zh" name="zh" required maxlength="240" placeholder="例如 频率"></label>
+        <label class="glossary-field-note">说明<textarea id="glossary-note" name="note" maxlength="800" rows="3" placeholder="可选：补充上下文或使用约束"></textarea></label>
+        <section class="glossary-backups" aria-label="术语表备份与恢复">
+          <div><div class="eyebrow">备份与恢复</div><select id="glossary-backup-select" aria-label="选择术语表备份"><option value="">暂无备份</option></select></div>
+          <div class="glossary-backup-actions">
+            <button id="glossary-backup-create" class="secondary-action" type="button">立即备份</button>
+            <button id="glossary-backup-restore" class="secondary-action" type="button">恢复所选</button>
+            <button id="glossary-backup-download" class="secondary-action" type="button">导出所选</button>
+            <button id="glossary-backup-delete" class="secondary-action danger-action" type="button">删除所选</button>
+          </div>
+          <small>每次修改前也会自动备份，最多保留 30 份。</small>
+        </section>
         <p id="glossary-message" class="glossary-message" aria-live="polite">保存后会立即参与术语识别与本地翻译。</p>
-        <button class="btn" type="submit">保存到 glossary.json</button>
+        <div class="glossary-form-actions">
+          <button id="glossary-delete" class="secondary-action danger-action" type="button" disabled>删除自定义词条</button>
+          <button class="btn" type="submit">保存到 glossary.json</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section id="complex-word-dialog" class="glossary-dialog" role="dialog" aria-modal="true" aria-labelledby="complex-word-title" hidden>
+  <div class="glossary-shell complex-word-shell">
+    <header class="glossary-header">
+      <div><div class="eyebrow">阅读词库</div><h2 id="complex-word-title">复杂词表</h2></div>
+      <button class="icon-btn" id="complex-word-close" type="button" aria-label="关闭复杂词表">×</button>
+    </header>
+    <div class="glossary-body complex-word-body">
+      <section class="glossary-browser">
+        <label class="glossary-search-label" for="complex-word-search">搜索复杂词</label>
+        <input id="complex-word-search" class="glossary-search" type="search" placeholder="英文单词或中文释义">
+        <div id="complex-word-list" class="glossary-list" aria-live="polite"></div>
+      </section>
+      <form id="complex-word-form" class="glossary-form complex-word-form">
+        <div><div class="eyebrow">新增或覆盖</div><h3>自定义复杂词</h3></div>
+        <label class="glossary-field-word">英文单词<input id="complex-word-word" name="word" required maxlength="120" pattern="[A-Za-z][A-Za-z'-]*" placeholder="例如 interfere"></label>
+        <label class="glossary-field-pos">难度<select id="complex-word-level" name="level"><option value="进阶">进阶</option><option value="较难" selected>较难</option></select></label>
+        <label class="glossary-field-zh">中文释义<input id="complex-word-zh" name="zh" required maxlength="240" placeholder="例如 干扰；妨碍"></label>
+        <label class="glossary-field-note">说明<textarea id="complex-word-note" name="note" maxlength="800" rows="4" placeholder="可选：解释该词在技术文档中的常见含义"></textarea></label>
+        <p id="complex-word-message" class="glossary-message" aria-live="polite">在句子分析原文中右击单词，会自动查询本地释义并填入这里。</p>
+        <div class="glossary-form-actions">
+          <button id="complex-word-delete" class="secondary-action danger-action" type="button" disabled>删除自定义复杂词</button>
+          <button class="btn" type="submit">保存到 complex_words.json</button>
+        </div>
       </form>
     </div>
   </div>

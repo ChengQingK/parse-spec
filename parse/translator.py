@@ -12,6 +12,22 @@ from typing import Any
 
 
 _PHRASES = {
+    "do not interfere with signals on the dram interface": "不与 DRAM 接口上的信号发生 interfere",
+    "update modes when the dfi bus is placed in an idle state": "DFI 总线处于空闲状态时可用的更新模式",
+    "signals on the dram interface": "DRAM 接口上的信号",
+    "is placed in an idle state": "处于空闲状态",
+    "do not interfere with": "不 interfere",
+    "to ensure that": "为 ensure",
+    "the dfi bus": "DFI 总线",
+    "update modes": "更新模式",
+    "the minimum number of additional data clocks": "最少附加数据时钟数",
+    "minimum number of additional data clocks": "最少附加数据时钟数",
+    "a minimum additional delay": "最小附加延迟",
+    "target chip select": "目标片选",
+    "timing parameter": "时序参数",
+    "required between commands": "命令之间所需的",
+    "between commands": "在命令之间",
+    "as required by": "按照……的要求",
     "which is driven by the controller": "其由控制器驱动",
     "at the rising edge of the clock": "在时钟上升沿",
     "at the falling edge": "在下降沿",
@@ -69,6 +85,8 @@ _WORDS = {
     "interface": "接口", "signal": "信号", "value": "值", "bit": "位", "field": "字段",
     "resource": "资源", "target": "目标", "source": "源", "destination": "目标", "device": "器件",
     "parameter": "参数", "parameters": "参数", "programmable": "可编程", "timing": "时序",
+    "minimum": "最小", "number": "数量", "additional": "附加", "clock": "时钟", "clocks": "时钟",
+    "delay": "延迟", "chip": "片", "select": "选择", "driven": "驱动", "specifies": "规定", "specify": "规定",
     "transfer": "传输", "information": "信息", "across": "跨越", "protocol": "协议", "defines": "定义",
     "apply": "适用", "applies": "适用", "encompass": "涵盖", "feature": "功能", "restriction": "限制",
     "corresponding": "对应", "version": "版本", "configuration": "配置", "interoperability": "互操作性",
@@ -86,6 +104,14 @@ _WORDS = {
 
 _TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_'-]*(?:\[[^\]]+\])?|\d+(?:\.\d+)?|[^\w\s]", re.UNICODE)
 _TECHNICAL = re.compile(r"(?:[A-Z]{2,}[A-Za-z0-9_]*|[A-Za-z]+\d+[A-Za-z0-9_]*|[a-z]+_[A-Za-z0-9_]+|t[A-Z][A-Za-z0-9_]*)$")
+_TIMING_PARAMETER_DEFINITION = re.compile(
+    r"^The\s+(?P<parameter>.+?)\s+timing\s+parameter\s+specifies\s+the\s+minimum\s+number\s+of\s+"
+    r"additional\s+Data\s+clocks\s+required\s+between\s+commands\s+when\s+changing\s+the\s+target\s+"
+    r"chip\s+select\s+driven\s+on\s+the\s+(?P<signal>[A-Za-z0-9_]+)\s+signal\s+and\s+defines\s+a\s+"
+    r"minimum\s+additional\s+delay\s+between\s+commands\s+when\s+changing\s+the\s+target\s+chip\s+"
+    r"select\s+as\s+required\s+by\s+the\s+(?P<authority>[A-Za-z0-9_]+)\.?$",
+    re.I,
+)
 
 
 def _lemma_candidates(word: str) -> list[str]:
@@ -116,6 +142,17 @@ def _translate_word(token: str, glossary: Any) -> str:
     return token
 
 
+def lookup_word_translation(word: str, glossary: Any = None) -> str | None:
+    """从本地术语表和结构翻译词库查询单词释义；未命中时明确返回 None。"""
+    source = str(word or "").strip()
+    if not source:
+        return None
+    translated = _translate_word(source, glossary)
+    if not translated or translated.casefold() == source.casefold():
+        return None
+    return translated
+
+
 def _join(tokens: list[str]) -> str:
     result = ""
     for token in tokens:
@@ -134,7 +171,13 @@ def _join(tokens: list[str]) -> str:
         elif token in {"(", "[", "{"}:
             result += token
         else:
-            needs_space = bool(result and result[-1].isascii() and result[-1].isalnum() and token[0].isascii() and token[0].isalnum())
+            previous = result[-1] if result else ""
+            current = token[0]
+            previous_word = previous.isalnum() or previous in "_]"
+            current_word = current.isalnum() or current == "_"
+            mixed_boundary = previous_word and current_word and (previous.isascii() != current.isascii())
+            ascii_boundary = previous_word and current_word and previous.isascii() and current.isascii()
+            needs_space = bool(result and (mixed_boundary or ascii_boundary))
             result += (" " if needs_space else "") + token
     return result.strip()
 
@@ -157,13 +200,50 @@ def translate_text(text: str, glossary: Any) -> str:
     return result
 
 
+def _normalize_identifier(value: str) -> str:
+    normalized = re.sub(r"\s+", "_", value.strip())
+    return re.sub(r"^t_?phy_", "t_phy_", normalized, flags=re.I)
+
+
+def _translate_timing_parameter_definition(text: str) -> dict[str, Any] | None:
+    match = _TIMING_PARAMETER_DEFINITION.fullmatch(text.strip())
+    if not match:
+        return None
+    parameter = _normalize_identifier(match.group("parameter"))
+    signal = match.group("signal")
+    authority = match.group("authority")
+    first = f"切换由 {signal} 信号驱动的目标片选时，命令之间所需的最少附加数据时钟数"
+    second = f"按照 {authority} 的要求切换目标片选时，命令之间的最小附加延迟"
+    return {
+        "text": f"{parameter} 时序参数规定了{first}；同时还规定了{second}。",
+        "clauses": [
+            {"clause_id": "semantic-1", "label": "第一项规定", "text": first + "。"},
+            {"clause_id": "semantic-2", "label": "并列规定", "text": second + "。"},
+        ],
+    }
+
+
 def translate_sentence(parsed: Any, glossary: Any) -> dict[str, Any]:
     """返回完整译文和逐分句译文，供 schema v3 的分析栏展示。"""
-    clauses = []
-    for clause in sorted(parsed.clauses, key=lambda item: item.order):
-        clauses.append({"clause_id": clause.id, "text": translate_text(clause.text, glossary)})
+    repaired = _translate_timing_parameter_definition(parsed.text)
+    if repaired:
+        text = repaired["text"]
+        clauses = repaired["clauses"]
+    else:
+        text = translate_text(parsed.text, glossary)
+        clauses = []
+        visible = [
+            clause for clause in sorted(parsed.clauses, key=lambda item: item.order)
+            if clause.id == parsed.main_clause_id or clause.parent_id == parsed.main_clause_id
+        ]
+        for clause in visible[:4]:
+            clauses.append({
+                "clause_id": clause.id,
+                "label": getattr(clause, "label", "结构片段"),
+                "text": translate_text(clause.text, glossary),
+            })
     return {
-        "text": translate_text(parsed.text, glossary),
+        "text": text,
         "engine": "structured-local",
         "label": "本地结构辅助译文",
         "clauses": clauses,

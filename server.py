@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import socket
 from dataclasses import asdict
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 import sys
@@ -57,8 +59,9 @@ except ModuleNotFoundError as exc:
     os.execv(str(project_python), command)
 
 from parse.clauser import parse_sentence
-from parse.glossary import BUILTIN, Glossary
-from parse.translator import translate_sentence
+from parse.complex_words import BUILTIN as COMPLEX_WORD_BUILTIN, ComplexWordTable, extract_complex_words, lemma_for_word
+from parse.glossary import BUILTIN as GLOSSARY_BUILTIN, Glossary
+from parse.translator import lookup_word_translation, translate_sentence
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
@@ -68,6 +71,10 @@ app = Flask(__name__, static_folder=None)
 _glossary_path = Path(BASE) / "glossary.json"
 _glossary = Glossary(str(_glossary_path))  # 用户可自定义
 _glossary_signature: tuple[int, int] | None = None
+_glossary_backup_dir = Path(BASE) / "backups" / "glossary"
+_complex_words_path = Path(BASE) / "complex_words.json"
+_complex_words = ComplexWordTable(_complex_words_path)
+_complex_words_signature: tuple[int, int] | None = None
 _bookmarks_path = Path(BASE) / "bookmarks.json"
 MAX_SENTENCES = 32
 MAX_SENTENCE_CHARS = 10_000
@@ -77,6 +84,8 @@ MAX_GLOSSARY_FIELD_CHARS = 800
 MAX_BOOKMARK_DOCUMENT_KEY_CHARS = 500
 MAX_BOOKMARKS_PER_DOCUMENT = 2_000
 MAX_BOOKMARK_TEXT_CHARS = 10_000
+MAX_BOOKMARK_NAME_CHARS = 200
+MAX_GLOSSARY_BACKUPS = 30
 DEFAULT_PORT = 5197
 FALLBACK_PORTS = (5800, 5801, 5802, 8000, 8765)
 app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
@@ -134,6 +143,7 @@ def _analyze_sentence(s: str) -> dict:
         "main_clause_id": ps.main_clause_id,
         "clauses": [asdict(clause) for clause in ps.clauses],
         "terms": words,
+        "complex_words": extract_complex_words(ps.text, _complex_words),
         "translation": translate_sentence(ps, _glossary),
         "warnings": ps.warnings,
     }
@@ -158,6 +168,25 @@ def _refresh_glossary_if_changed() -> None:
     _analyze_sentence.cache_clear()
 
 
+def _current_complex_words_signature() -> tuple[int, int] | None:
+    try:
+        stat = _complex_words_path.stat()
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
+
+def _refresh_complex_words_if_changed() -> None:
+    """自动重载项目复杂词表，并使当前分析立即采用新内容。"""
+    global _complex_words, _complex_words_signature
+    signature = _current_complex_words_signature()
+    if signature == _complex_words_signature:
+        return
+    _complex_words = ComplexWordTable(_complex_words_path)
+    _complex_words_signature = signature
+    _analyze_sentence.cache_clear()
+
+
 def _read_user_glossary() -> dict[str, dict[str, str]]:
     if not _glossary_path.exists():
         return {}
@@ -178,9 +207,99 @@ def _read_user_glossary() -> dict[str, dict[str, str]]:
     }
 
 
+def _read_user_complex_words() -> dict[str, dict[str, str]]:
+    if not _complex_words_path.exists():
+        return {}
+    try:
+        value = json.loads(_complex_words_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(word).strip().lower(): {
+            "zh": str(entry.get("zh", "")).strip(),
+            "level": str(entry.get("level", "较难")).strip() or "较难",
+            "note": str(entry.get("note", "")).strip(),
+        }
+        for word, entry in value.items()
+        if isinstance(entry, dict) and str(entry.get("zh", "")).strip()
+    }
+
+
+def _write_user_complex_words(value: dict[str, dict[str, str]]) -> None:
+    temporary_path = _complex_words_path.with_suffix(_complex_words_path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary_path.replace(_complex_words_path)
+
+
+def _normalize_user_glossary(value: object) -> dict[str, dict[str, str]]:
+    if not isinstance(value, dict):
+        raise ValueError("词典根节点必须是 JSON 对象")
+    normalized: dict[str, dict[str, str]] = {}
+    for raw_word, raw_entry in value.items():
+        word = str(raw_word).strip().lower()
+        if not isinstance(raw_entry, dict):
+            raise ValueError(f"词条 {word or '(空)'} 必须是 JSON 对象")
+        pos = str(raw_entry.get("pos", "")).strip()
+        zh = str(raw_entry.get("zh", "")).strip()
+        note = str(raw_entry.get("note", "")).strip()
+        if not word or not zh:
+            raise ValueError("每个词条都必须包含英文词条和中文释义")
+        if len(word) > MAX_GLOSSARY_WORD_CHARS or any(len(field) > MAX_GLOSSARY_FIELD_CHARS for field in (pos, zh, note)):
+            raise ValueError(f"词条 {word} 的字段过长")
+        if any(ord(char) < 32 for char in word) or any(char in word for char in "\r\n\t"):
+            raise ValueError(f"词条 {word} 包含无效字符")
+        normalized[word] = {"pos": pos, "zh": zh, "note": note}
+    return normalized
+
+
+def _write_user_glossary(value: dict[str, dict[str, str]]) -> None:
+    temporary_path = _glossary_path.with_suffix(_glossary_path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary_path.replace(_glossary_path)
+
+
+def _create_glossary_backup(reason: str = "manual") -> Path:
+    _glossary_backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    safe_reason = re.sub(r"[^a-z0-9-]+", "-", reason.lower()).strip("-") or "manual"
+    destination = _glossary_backup_dir / f"glossary-{timestamp}-{safe_reason}.json"
+    destination.write_text(
+        json.dumps(_read_user_glossary(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    backups = sorted(_glossary_backup_dir.glob("glossary-*.json"), key=lambda path: path.stat().st_mtime_ns, reverse=True)
+    for expired in backups[MAX_GLOSSARY_BACKUPS:]:
+        expired.unlink(missing_ok=True)
+    return destination
+
+
+def _glossary_backups() -> list[dict[str, object]]:
+    if not _glossary_backup_dir.exists():
+        return []
+    result = []
+    for path in sorted(_glossary_backup_dir.glob("glossary-*.json"), key=lambda item: item.stat().st_mtime_ns, reverse=True):
+        stat = path.stat()
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8-sig"))
+            entry_count = len(entries) if isinstance(entries, dict) else 0
+        except (OSError, ValueError):
+            entry_count = 0
+        stem_parts = path.stem.split("-", 4)
+        result.append({
+            "filename": path.name,
+            "size": stat.st_size,
+            "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "entry_count": entry_count,
+            "reason": stem_parts[4] if len(stem_parts) > 4 else "backup",
+        })
+    return result
+
+
 def _glossary_entries() -> list[dict[str, str]]:
     user = _read_user_glossary()
-    merged = {word: {**entry, "word": word, "source": "builtin"} for word, entry in BUILTIN.items()}
+    merged = {word: {**entry, "word": word, "source": "builtin"} for word, entry in GLOSSARY_BUILTIN.items()}
     for word, entry in user.items():
         merged[word] = {**entry, "word": word, "source": "custom"}
     return sorted(merged.values(), key=lambda entry: entry["word"])
@@ -221,16 +340,18 @@ def _normalize_bookmarks(value: object) -> list[dict]:
         ):
             raise ValueError("书签句子序号必须是非负整数或 null")
         bookmark_id = str(item.get("id", "")).strip()
+        name = str(item.get("name", "")).strip()
         text = str(item.get("text", "")).strip()
         created_at = str(item.get("createdAt", "")).strip()
         if not bookmark_id or len(bookmark_id) > 200:
             raise ValueError("书签 id 无效")
-        if len(text) > MAX_BOOKMARK_TEXT_CHARS or len(created_at) > 100:
+        if len(name) > MAX_BOOKMARK_NAME_CHARS or len(text) > MAX_BOOKMARK_TEXT_CHARS or len(created_at) > 100:
             raise ValueError("书签字段过长")
         normalized.append({
             "id": bookmark_id,
             "pageNum": page_num,
             "sentenceIndex": sentence_index,
+            "name": name or f"第 {page_num} 页",
             "text": text or f"第 {page_num} 页",
             "createdAt": created_at,
         })
@@ -276,6 +397,7 @@ def analyze():
     if any(len(sentence) > MAX_SENTENCE_CHARS for sentence in sentences):
         return jsonify({"error": f"单句不能超过 {MAX_SENTENCE_CHARS} 个字符"}), 400
     _refresh_glossary_if_changed()
+    _refresh_complex_words_if_changed()
     results = [_analyze_sentence(s.strip()) for s in sentences]
     return jsonify({"results": results})
 
@@ -308,15 +430,193 @@ def save_glossary_entry():
     user = _read_user_glossary()
     user[word] = {"pos": pos, "zh": zh, "note": note}
     try:
-        temporary_path = _glossary_path.with_suffix(_glossary_path.suffix + ".tmp")
-        temporary_path.write_text(json.dumps(user, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temporary_path.replace(_glossary_path)
+        _create_glossary_backup("before-edit")
+        _write_user_glossary(user)
     except OSError as exc:
         return jsonify({"error": f"无法写入 glossary.json：{exc}"}), 500
     global _glossary_signature
     _glossary_signature = None
     _refresh_glossary_if_changed()
     return jsonify({"entry": {"word": word, "pos": pos, "zh": zh, "note": note, "source": "custom"}})
+
+
+@app.delete("/api/glossary")
+def delete_glossary_entry():
+    """删除自定义词条；若它覆盖内置词条，删除后恢复显示内置释义。"""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求体必须是 JSON 对象"}), 400
+    word = str(data.get("word", "")).strip().lower()
+    if not word or len(word) > MAX_GLOSSARY_WORD_CHARS:
+        return jsonify({"error": "英文词条无效"}), 400
+    user = _read_user_glossary()
+    if word not in user:
+        return jsonify({"error": "只能删除 glossary.json 中的自定义词条"}), 404
+    try:
+        _create_glossary_backup("before-delete")
+        del user[word]
+        _write_user_glossary(user)
+    except OSError as exc:
+        return jsonify({"error": f"无法更新 glossary.json：{exc}"}), 500
+    global _glossary_signature
+    _glossary_signature = None
+    _refresh_glossary_if_changed()
+    return jsonify({"deleted": word, "reverted_to_builtin": word in GLOSSARY_BUILTIN})
+
+
+@app.get("/api/glossary/backups")
+def list_glossary_backups():
+    return jsonify({"backups": _glossary_backups(), "directory": str(_glossary_backup_dir.relative_to(Path(BASE)))})
+
+
+@app.post("/api/glossary/backups")
+def create_glossary_backup():
+    try:
+        backup = _create_glossary_backup("manual")
+    except OSError as exc:
+        return jsonify({"error": f"无法创建术语表备份：{exc}"}), 500
+    return jsonify({"backup": next(item for item in _glossary_backups() if item["filename"] == backup.name)})
+
+
+@app.get("/api/glossary/backups/<path:filename>")
+def download_glossary_backup(filename: str):
+    if Path(filename).name != filename or not re.fullmatch(r"glossary-[A-Za-z0-9-]+\.json", filename):
+        return jsonify({"error": "备份文件名无效"}), 400
+    if not (_glossary_backup_dir / filename).is_file():
+        return jsonify({"error": "备份不存在"}), 404
+    return send_from_directory(_glossary_backup_dir, filename, as_attachment=True)
+
+
+@app.delete("/api/glossary/backups/<path:filename>")
+def delete_glossary_backup(filename: str):
+    if Path(filename).name != filename or not re.fullmatch(r"glossary-[A-Za-z0-9-]+\.json", filename):
+        return jsonify({"error": "备份文件名无效"}), 400
+    target = _glossary_backup_dir / filename
+    if not target.is_file():
+        return jsonify({"error": "备份不存在"}), 404
+    try:
+        target.unlink()
+    except OSError as exc:
+        return jsonify({"error": f"无法删除术语表备份：{exc}"}), 500
+    return jsonify({"deleted": filename})
+
+
+@app.post("/api/glossary/restore")
+def restore_glossary_backup():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求体必须是 JSON 对象"}), 400
+    filename = str(data.get("filename", "")).strip()
+    if Path(filename).name != filename or not re.fullmatch(r"glossary-[A-Za-z0-9-]+\.json", filename):
+        return jsonify({"error": "备份文件名无效"}), 400
+    source = _glossary_backup_dir / filename
+    if not source.is_file():
+        return jsonify({"error": "备份不存在"}), 404
+    try:
+        restored = _normalize_user_glossary(json.loads(source.read_text(encoding="utf-8-sig")))
+        _create_glossary_backup("before-restore")
+        _write_user_glossary(restored)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return jsonify({"error": f"无法恢复术语表：{exc}"}), 400
+    global _glossary_signature
+    _glossary_signature = None
+    _refresh_glossary_if_changed()
+    return jsonify({"restored": filename, "entry_count": len(restored)})
+
+
+@app.get("/api/complex-words/suggest")
+def suggest_complex_word():
+    """为右击添加的单词查询本地释义，避免要求用户自行解释陌生词。"""
+    word = request.args.get("word", "").strip().lower()
+    if not re.fullmatch(r"[a-z][a-z'-]*", word):
+        return jsonify({"error": "复杂词必须是单个英文单词"}), 400
+    _refresh_glossary_if_changed()
+    _refresh_complex_words_if_changed()
+    lemma = lemma_for_word(word) or word
+    candidates = list(dict.fromkeys((word, lemma)))
+
+    for candidate in candidates:
+        entry = _complex_words.lookup(candidate)
+        if entry:
+            return jsonify({"suggestion": {
+                "word": word, "lemma": candidate, "zh": entry["zh"],
+                "level": entry.get("level", "较难"), "note": entry.get("note", ""),
+                "source": f"complex-{entry.get('source', 'builtin')}",
+            }})
+    for candidate in candidates:
+        entry = _glossary.lookup(candidate)
+        if entry and entry.get("zh"):
+            note = str(entry.get("note", "")).strip()
+            return jsonify({"suggestion": {
+                "word": word, "lemma": candidate, "zh": str(entry["zh"]),
+                "level": "较难", "note": note or "自动取自本地术语表",
+                "source": "glossary",
+            }})
+    for candidate in candidates:
+        translated = lookup_word_translation(candidate, _glossary)
+        if translated:
+            return jsonify({"suggestion": {
+                "word": word, "lemma": candidate, "zh": translated,
+                "level": "较难", "note": "自动取自本地结构翻译词库",
+                "source": "translator",
+            }})
+    return jsonify({"error": "本地词典暂未收录该单词，无法可靠生成释义"}), 404
+
+
+@app.get("/api/complex-words")
+def get_complex_words():
+    """列出内置和项目自定义复杂词，供前端统一维护。"""
+    _refresh_complex_words_if_changed()
+    return jsonify({"entries": _complex_words.entries(), "user_file": _complex_words_path.name})
+
+
+@app.post("/api/complex-words")
+def save_complex_word():
+    if not request.is_json:
+        return jsonify({"error": "请求体必须使用 application/json"}), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求体必须是 JSON 对象"}), 400
+    word = str(data.get("word", "")).strip().lower()
+    zh = str(data.get("zh", "")).strip()
+    level = str(data.get("level", "较难")).strip() or "较难"
+    note = str(data.get("note", "")).strip()
+    if not re.fullmatch(r"[a-z][a-z'-]*", word):
+        return jsonify({"error": "复杂词必须是单个英文单词"}), 400
+    if not zh:
+        return jsonify({"error": "中文释义不能为空"}), 400
+    if len(word) > MAX_GLOSSARY_WORD_CHARS or any(len(field) > MAX_GLOSSARY_FIELD_CHARS for field in (zh, level, note)):
+        return jsonify({"error": "复杂词字段过长"}), 400
+    user = _read_user_complex_words()
+    user[word] = {"zh": zh, "level": level, "note": note}
+    try:
+        _write_user_complex_words(user)
+    except OSError as exc:
+        return jsonify({"error": f"无法写入 complex_words.json：{exc}"}), 500
+    global _complex_words_signature
+    _complex_words_signature = None
+    _refresh_complex_words_if_changed()
+    return jsonify({"entry": {"word": word, "zh": zh, "level": level, "note": note, "source": "custom"}})
+
+
+@app.delete("/api/complex-words")
+def delete_complex_word():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求体必须是 JSON 对象"}), 400
+    word = str(data.get("word", "")).strip().lower()
+    user = _read_user_complex_words()
+    if word not in user:
+        return jsonify({"error": "只能删除 complex_words.json 中的自定义复杂词"}), 404
+    try:
+        del user[word]
+        _write_user_complex_words(user)
+    except OSError as exc:
+        return jsonify({"error": f"无法更新 complex_words.json：{exc}"}), 500
+    global _complex_words_signature
+    _complex_words_signature = None
+    _refresh_complex_words_if_changed()
+    return jsonify({"deleted": word, "reverted_to_builtin": word in COMPLEX_WORD_BUILTIN})
 
 
 @app.get("/api/bookmarks")

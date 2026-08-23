@@ -65,7 +65,8 @@ function resultFor(text) {
       { id: 'c1', parent_id: 'c0', order: 1, text: 'when ready', start: 20, end: 30, segments: [[20, 30]], relation: 'time', label: '时间关系', grammar: { subject: 'it', predicate: 'is ready', voice: 'active', negated: false }, confidence: .7, warnings: ['child warning'] },
     ],
     terms: [{ word: 'sampled', pos: 'v.', zh: '采样', note: 'technical note' }],
-    translation: { text: '数据被采样。' },
+    complex_words: [{ word: 'interfere', lemma: 'interfere', zh: '干扰；妨碍', level: '较难', note: 'reading note' }],
+    translation: { text: '数据被 sampled。' },
     warnings: ['global warning'],
   };
 }
@@ -74,14 +75,17 @@ function loadViewer({ narrow = false, preset = null, legacyBookmarks = null } = 
   const ids = [
     'file','file-empty','pages','placeholder','workspace','analysis-panel','analysis-content','panel-toggle','panel-close','panel-resizer','doc-meta',
     'recent-docs','recent-docs-menu','recent-docs-list','theme-cycle','theme-icon',
-    'settings-toggle','settings-popover','settings-close','depth-select','structure-select','position-select','settings-reset',
-    'outline-toggle','outline-panel','outline-close','outline-content','bookmark-toggle','bookmark-panel','bookmark-close','bookmark-add','bookmark-content','nav-resizer','doc',
+    'depth-concise','depth-standard','depth-detailed','structure-bracket','structure-linked',
+    'outline-toggle','outline-panel','outline-close','outline-content','bookmark-toggle','bookmark-panel','bookmark-close','bookmark-name','bookmark-add','bookmark-content','nav-resizer','doc',
+    'page-status','zoom-out','zoom-reset','zoom-in','panel-source-text','complex-word-toggle','complex-word-dialog','complex-word-close','complex-word-search','complex-word-list','complex-word-form','complex-word-word','complex-word-level','complex-word-zh','complex-word-note','complex-word-message','complex-word-delete','glossary-toggle','glossary-dialog','glossary-close','glossary-search','glossary-list','glossary-form','glossary-word','glossary-pos','glossary-zh','glossary-note','glossary-message','glossary-delete','glossary-backup-select','glossary-backup-create','glossary-backup-restore','glossary-backup-download','glossary-backup-delete',
   ];
   const els = Object.fromEntries(ids.map((id) => [id, new FakeElement()]));
-  els['settings-popover'].hidden = true;
+  for (const value of ['concise','standard','detailed']) els[`depth-${value}`].dataset.analysisDepth = value;
+  for (const value of ['bracket','linked']) els[`structure-${value}`].dataset.structureView = value;
   els['recent-docs-menu'].hidden = true;
   els['outline-panel'].hidden = true;
   els['bookmark-panel'].hidden = true;
+  els['complex-word-dialog'].hidden = true;
   const storage = new Map();
   if (preset) storage.set('parse-spec:settings', JSON.stringify(preset));
   if (legacyBookmarks) storage.set('parse-spec:bookmarks', JSON.stringify(legacyBookmarks));
@@ -117,6 +121,7 @@ function loadViewer({ narrow = false, preset = null, legacyBookmarks = null } = 
   };
   let fetchCount = 0;
   const projectBookmarks = {};
+  const projectComplexWords = {};
   const fetch = async (url, options = {}) => {
     if (String(url).startsWith('/api/bookmarks?')) {
       const documentKey = decodeURIComponent(String(url).split('document_key=')[1] || '');
@@ -126,6 +131,31 @@ function loadViewer({ narrow = false, preset = null, legacyBookmarks = null } = 
       const payload = JSON.parse(options.body);
       projectBookmarks[payload.document_key] = payload.bookmarks;
       return { ok: true, status: 200, json: async () => ({ bookmarks: payload.bookmarks, user_file: 'bookmarks.json' }) };
+    }
+    if (url === '/api/complex-words' && (!options.method || options.method === 'GET')) {
+      const entries = [
+        { word: 'ensure', zh: '确保', level: '进阶', note: '', source: 'builtin' },
+        ...Object.entries(projectComplexWords).map(([word, entry]) => ({ word, ...entry, source: 'custom' })),
+      ];
+      return { ok: true, status: 200, json: async () => ({ entries, user_file: 'complex_words.json' }) };
+    }
+    if (String(url).startsWith('/api/complex-words/suggest?')) {
+      const word = decodeURIComponent(String(url).split('word=')[1] || '');
+      const meanings = { latency: '延迟', intricate: '复杂的；错综的' };
+      const zh = meanings[word];
+      return zh
+        ? { ok: true, status: 200, json: async () => ({ suggestion: { word, lemma: word, zh, level: '较难', note: '自动取自本地术语表', source: 'glossary' } }) }
+        : { ok: false, status: 404, json: async () => ({ error: '本地词典暂未收录该单词' }) };
+    }
+    if (url === '/api/complex-words' && options.method === 'POST') {
+      const payload = JSON.parse(options.body);
+      projectComplexWords[payload.word] = { zh: payload.zh, level: payload.level, note: payload.note };
+      return { ok: true, status: 200, json: async () => ({ entry: { ...payload, source: 'custom' } }) };
+    }
+    if (url === '/api/complex-words' && options.method === 'DELETE') {
+      const payload = JSON.parse(options.body);
+      delete projectComplexWords[payload.word];
+      return { ok: true, status: 200, json: async () => ({ deleted: payload.word, reverted_to_builtin: payload.word === 'ensure' }) };
     }
     fetchCount++;
     const text = JSON.parse(options.body).sentences[0];
@@ -139,10 +169,29 @@ function loadViewer({ narrow = false, preset = null, legacyBookmarks = null } = 
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'static', 'pdf_helpers.js'), 'utf8'), context);
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'static', 'viewer.js'), 'utf8'), context);
-  return { context, els, storage, projectBookmarks, flushAnimationFrames, getPendingFrameCount: () => frameCallbacks.size, getFetchCount: () => fetchCount };
+  return { context, els, storage, projectBookmarks, projectComplexWords, flushAnimationFrames, getPendingFrameCount: () => frameCallbacks.size, getFetchCount: () => fetchCount };
 }
 
-test('下栏主题按钮循环主题并持久化，设置中不再包含主题选择器', () => {
+test('复杂词表可维护，分析原文右击单词会自动填充释义', async () => {
+  const { context, els, projectComplexWords } = loadViewer();
+  assert.equal(context.wordAtTextOffset('The controller handles intricate timing.', 25), 'intricate');
+  context.window.getSelection = () => ({ toString: () => 'latency' });
+  context.renderAnalysisPanel({ text: 'Latency is constrained.', pageNum: 1, sentenceIndex: 0 }, resultFor('Latency is constrained.'));
+  let prevented = false;
+  els['panel-source-text'].emit('contextmenu', { preventDefault: () => { prevented = true; } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(prevented, true);
+  assert.equal(els['complex-word-dialog'].hidden, false);
+  assert.equal(els['complex-word-word'].value, 'latency');
+  assert.equal(els['complex-word-zh'].value, '延迟');
+  assert.match(els['complex-word-message'].textContent, /已自动填充/);
+  els['complex-word-level'].value = '较难';
+  await context.submitComplexWord({ preventDefault() {} });
+  assert.equal(projectComplexWords.latency.zh, '延迟');
+  assert.match(els['complex-word-message'].textContent, /已保存/);
+});
+
+test('主题位于下栏，分析选项直接位于分析栏', () => {
   const { context, els, storage } = loadViewer();
   context.setTheme('dark');
   assert.equal(context.document.documentElement.dataset.theme, 'dark');
@@ -153,7 +202,37 @@ test('下栏主题按钮循环主题并持久化，设置中不再包含主题�
   assert.match(storage.get('parse-spec:settings'), /"theme":"eye"/);
   const html = fs.readFileSync(path.join(__dirname, '..', 'static', 'index.html'), 'utf8');
   assert.match(html, /class="bottom-bar"/);
+  assert.match(html, /class="analysis-toolbar"/);
+  assert.doesNotMatch(html, /id="settings-toggle"/);
   assert.doesNotMatch(html, /id="theme-select"/);
+});
+
+test('下栏 PDF 缩放先平滑预览再提交布局并持久化', async () => {
+  const { context, els, storage } = loadViewer();
+  context.setPdfZoom(1.6);
+  assert.equal(els.pages.style.transform, 'scale(1.6)');
+  assert.equal(els.pages.style.zoom, '1');
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  assert.equal(els.pages.style.zoom, '1.6');
+  assert.equal(els.pages.style.transform, '');
+  assert.equal(els['zoom-reset'].textContent, '160%');
+  assert.equal(storage.get('parse-spec:pdf-zoom'), '1.6');
+  context.setPdfZoom(9);
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  assert.equal(els.pages.style.zoom, '2');
+  assert.equal(els['zoom-in'].disabled, true);
+});
+
+test('译文中的未翻译词点击后原位切换为中文释义', () => {
+  const { context } = loadViewer();
+  const button = new FakeElement();
+  button.dataset.termOriginal = 'interfere';
+  button.dataset.termTranslation = '干扰';
+  assert.equal(context.toggleTranslationTerm(button), true);
+  assert.equal(button.textContent, '干扰');
+  assert.equal(button.getAttribute('aria-pressed'), 'true');
+  assert.equal(context.toggleTranslationTerm(button), false);
+  assert.equal(button.textContent, 'interfere');
 });
 
 test('最近文档只保存在页面内存，顶栏仅渲染文件名', () => {
@@ -172,14 +251,14 @@ test('最近文档只保存在页面内存，顶栏仅渲染文件名', () => {
   assert.equal(els['doc-meta'].getAttribute('aria-expanded'), 'true');
 });
 
-test('上下停靠切换为水平分隔条并保存高度', () => {
-  const { context, els, storage } = loadViewer();
-  context.setPanelPosition('top');
-  assert.equal(els.workspace.dataset.panelPosition, 'top');
-  assert.equal(els['panel-resizer'].getAttribute('aria-orientation'), 'horizontal');
-  context.setPanelHeight(900, true);
-  assert.equal(els['panel-resizer'].getAttribute('aria-valuenow'), '560');
-  assert.equal(storage.get('parse-spec:panel-height'), '560');
+test('分析栏固定右侧且只保留宽度调节', () => {
+  const { els } = loadViewer();
+  const html = fs.readFileSync(path.join(__dirname, '..', 'static', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'static', 'settings.css'), 'utf8');
+  assert.equal(els['panel-resizer'].getAttribute('aria-orientation'), 'vertical');
+  assert.doesNotMatch(html, /position-select|data-panel-position/);
+  assert.doesNotMatch(css, /data-panel-position|panel-height/);
+  assert.match(css, /doc resizer panel/);
 });
 
 test('逻辑结构展示方式可切换并持久化', () => {
@@ -189,7 +268,8 @@ test('逻辑结构展示方式可切换并持久化', () => {
 
   context.setStructureView('linked');
   context.renderAnalysisPanel(target, result);
-  assert.equal(els['structure-select'].value, 'linked');
+  assert.equal(els['structure-linked'].getAttribute('aria-pressed'), 'true');
+  assert.equal(els['structure-bracket'].getAttribute('aria-pressed'), 'false');
   assert.match(storage.get('parse-spec:settings'), /"structureView":"linked"/);
   assert.match(els['analysis-content'].innerHTML, /逻辑结构 · 原文联动树/);
   assert.match(els['analysis-content'].innerHTML, /linked-source-map/);
@@ -204,15 +284,14 @@ test('逻辑结构展示方式可切换并持久化', () => {
   assert.match(els['analysis-content'].innerHTML, /时间从句/);
 });
 
-test('关闭分析栏时选句不发起后端请求', () => {
-  const { context, els, getFetchCount } = loadViewer();
-  context.setPanelPosition('off');
-  const span = new FakeElement();
-  const target = { key: '1:0', pageNum: 1, sentenceIndex: 0, text: 'The data is sampled.', spans: [span] };
-  context.selectSentence(target);
-  assert.equal(getFetchCount(), 0);
+test('分析栏收起后可由顶栏直接恢复', () => {
+  const { context, els } = loadViewer();
+  context.setPanelCollapsed(true);
   assert.equal(els.workspace.classList.contains('panel-collapsed'), true);
-  assert.equal(els['panel-toggle'].disabled, true);
+  assert.equal(els['panel-toggle'].disabled, false);
+  els['panel-toggle'].emit('click');
+  assert.equal(els.workspace.classList.contains('panel-collapsed'), false);
+  assert.equal(els['panel-toggle'].getAttribute('aria-expanded'), 'true');
 });
 
 test('解析程度三档控制内容密度', () => {
@@ -225,13 +304,16 @@ test('解析程度三档控制内容密度', () => {
   assert.match(els['analysis-content'].innerHTML, /核心命题/);
   assert.match(els['analysis-content'].innerHTML, /中文翻译/);
   assert.doesNotMatch(els['analysis-content'].innerHTML, /逻辑结构/);
-  assert.doesNotMatch(els['analysis-content'].innerHTML, /复杂词 \/ 术语/);
+  assert.doesNotMatch(els['analysis-content'].innerHTML, /section-heading">复杂词/);
 
   context.setAnalysisDepth('standard');
   context.renderAnalysisPanel(target, result);
   assert.match(els['analysis-content'].innerHTML, /逻辑结构/);
   assert.match(els['analysis-content'].innerHTML, /中文翻译/);
-  assert.match(els['analysis-content'].innerHTML, /复杂词 \/ 术语/);
+  assert.match(els['analysis-content'].innerHTML, /section-heading">复杂词/);
+  assert.match(els['analysis-content'].innerHTML, /interfere/);
+  assert.doesNotMatch(els['analysis-content'].innerHTML, /at the rising edge of/);
+  assert.match(els['analysis-content'].innerHTML, /translation-term/);
   assert.doesNotMatch(els['analysis-content'].innerHTML, /technical note/);
   assert.doesNotMatch(els['analysis-content'].innerHTML, /高可信/);
 
@@ -243,14 +325,13 @@ test('解析程度三档控制内容密度', () => {
   assert.match(els['analysis-content'].innerHTML, /中文翻译/);
 });
 
-test('目录与左侧分析栏保持独立停靠且目录不会被设置位置关闭', () => {
-  const { context, els } = loadViewer({ preset: { theme: 'light', analysisDepth: 'standard', panelPosition: 'left' } });
+test('目录与固定右侧分析栏保持独立', () => {
+  const { context, els } = loadViewer({ preset: { theme: 'light', analysisDepth: 'standard' } });
   context.setOutlineOpen(true);
   assert.equal(els['outline-panel'].hidden, false);
-  assert.equal(els.workspace.dataset.panelPosition, 'left');
   assert.equal(els.workspace.classList.contains('outline-open'), true);
   assert.equal(els.workspace.classList.contains('panel-collapsed'), false);
-  assert.match(fs.readFileSync(path.join(__dirname, '..', 'static', 'settings.css'), 'utf8'), /outline nav-resizer panel resizer doc/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'static', 'settings.css'), 'utf8'), /outline nav-resizer doc resizer panel/);
 });
 
 test('目录宽度可调整、受边界限制并持久化', () => {
@@ -351,12 +432,11 @@ test('回归：悬停只预览，单击才解析并锁定', async () => {
   assert.equal(span.classList.contains('is-selected'), true);
 });
 
-test('回归：窄屏初始收起，选句后按设置方向展开', () => {
-  const { context, els } = loadViewer({ narrow: true, preset: { theme: 'light', analysisDepth: 'standard', panelPosition: 'left' } });
+test('回归：窄屏初始收起，选句后从右侧展开', () => {
+  const { context, els } = loadViewer({ narrow: true, preset: { theme: 'light', analysisDepth: 'standard' } });
   assert.equal(els.workspace.classList.contains('panel-collapsed'), true);
   const span = wireSentence(context, 1, 'The data is sampled.');
   span.emit('click');
-  assert.equal(els.workspace.dataset.panelPosition, 'left');
   assert.equal(els.workspace.classList.contains('panel-collapsed'), false);
 });
 
