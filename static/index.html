@@ -15,7 +15,13 @@
     <span class="brand">Parse-Spec</span>
     <span class="sub">本地离线 · 阅读与拆解英文技术文档</span>
   </div>
-  <span class="doc-meta" id="doc-meta">尚未打开 PDF</span>
+  <div class="recent-docs" id="recent-docs">
+    <button class="doc-meta" id="doc-meta" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="recent-docs-menu">尚未打开 PDF</button>
+    <section class="recent-docs-menu" id="recent-docs-menu" aria-label="最近文档" hidden>
+      <div class="recent-docs-heading">最近文档 <span>仅本次使用期间保留</span></div>
+      <div id="recent-docs-list" class="recent-docs-list"><div class="recent-docs-empty">暂无最近文档</div></div>
+    </section>
+  </div>
   <div class="settings-wrap">
     <button class="icon-btn settings-toggle" id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings-popover">设置</button>
     <section class="settings-popover" id="settings-popover" aria-label="阅读与解析设置" hidden>
@@ -26,20 +32,19 @@
         </div>
         <button class="icon-btn settings-close" id="settings-close" type="button" aria-label="关闭设置">×</button>
       </div>
-      <label class="setting-row" for="theme-select">
-        <span><strong>颜色主题</strong><small>调整页面背景与分析栏配色</small></span>
-        <select id="theme-select">
-          <option value="light">浅色</option>
-          <option value="dark">暗色</option>
-          <option value="eye">护眼色</option>
-        </select>
-      </label>
       <label class="setting-row" for="depth-select">
         <span><strong>解析程度</strong><small>控制分析结果展示的信息密度</small></span>
         <select id="depth-select">
           <option value="concise">简洁</option>
           <option value="standard">标准</option>
           <option value="detailed">详细</option>
+        </select>
+      </label>
+      <label class="setting-row" for="structure-select">
+        <span><strong>逻辑结构展示</strong><small>在原文顺序与关系树之间切换</small></span>
+        <select id="structure-select">
+          <option value="bracket">嵌套原文</option>
+          <option value="linked">原文联动树</option>
         </select>
       </label>
       <label class="setting-row" for="position-select">
@@ -56,6 +61,8 @@
     </section>
   </div>
   <button class="icon-btn outline-toggle" id="outline-toggle" type="button" aria-expanded="false" aria-controls="outline-panel" aria-label="打开 PDF 目录">目录</button>
+  <button class="icon-btn bookmark-toggle" id="bookmark-toggle" type="button" aria-expanded="false" aria-controls="bookmark-panel" aria-label="打开书签">书签</button>
+  <button class="icon-btn glossary-toggle" id="glossary-toggle" type="button" aria-expanded="false" aria-controls="glossary-dialog">术语表</button>
   <button class="icon-btn panel-toggle" id="panel-toggle" type="button" aria-expanded="true" aria-controls="analysis-panel">收起分析</button>
   <label class="btn filebtn">选择 PDF
     <input type="file" id="file" accept="application/pdf" hidden>
@@ -63,6 +70,28 @@
 </header>
 
 <main class="workspace" id="workspace" data-panel-position="right">
+  <aside id="outline-panel" class="outline-panel" aria-label="PDF 目录" hidden>
+    <header class="outline-header">
+      <div><div class="eyebrow">文档导航</div><h2>目录</h2></div>
+      <button class="icon-btn outline-close" id="outline-close" type="button" aria-label="关闭目录">×</button>
+    </header>
+    <div class="outline-content" id="outline-content"><div class="outline-empty">打开 PDF 后读取目录…</div></div>
+  </aside>
+
+  <aside id="bookmark-panel" class="bookmark-panel" aria-label="文档书签" hidden>
+    <header class="outline-header">
+      <div><div class="eyebrow">文档导航</div><h2>书签</h2></div>
+      <button class="icon-btn outline-close" id="bookmark-close" type="button" aria-label="关闭书签">×</button>
+    </header>
+    <div class="bookmark-actions">
+      <button class="btn bookmark-add" id="bookmark-add" type="button">＋ 添加当前位置</button>
+      <p>已选句子时记录句子，否则记录当前页。</p>
+    </div>
+    <div class="outline-content bookmark-content" id="bookmark-content"><div class="outline-empty">打开 PDF 后可添加书签。</div></div>
+  </aside>
+
+  <div id="nav-resizer" class="nav-resizer" role="separator" aria-label="调整导航栏宽度" aria-orientation="vertical" tabindex="0"></div>
+
   <section id="doc" class="document-pane" aria-label="PDF 阅读区">
     <div class="placeholder" id="placeholder">
       <span class="placeholder-mark">PS</span>
@@ -89,19 +118,42 @@
       <div class="panel-empty">
         <span class="panel-empty-icon">↗</span>
         <h3>从 PDF 中选择一句话</h3>
-        <p>悬停查看句子范围，单击锁定分析。面板位置、主题和解析程度可在“设置”中调整。</p>
+        <p>悬停查看句子范围，单击锁定分析。主题可在下栏切换，面板位置和解析程度可在“设置”中调整。</p>
       </div>
     </div>
   </aside>
 </main>
 
-<aside id="outline-panel" class="outline-panel" aria-label="PDF 目录" hidden>
-  <header class="outline-header">
-    <div><div class="eyebrow">文档导航</div><h2>目录</h2></div>
-    <button class="icon-btn outline-close" id="outline-close" type="button" aria-label="关闭目录">×</button>
-  </header>
-  <div class="outline-content" id="outline-content"><div class="outline-empty">打开 PDF 后读取目录…</div></div>
-</aside>
+<footer class="bottom-bar" aria-label="快捷工具栏">
+  <button id="theme-cycle" class="bottom-icon-btn" type="button" aria-label="切换颜色主题" title="切换颜色主题">
+    <span id="theme-icon" aria-hidden="true">☀</span>
+  </button>
+</footer>
+
+<section id="glossary-dialog" class="glossary-dialog" role="dialog" aria-modal="true" aria-labelledby="glossary-title" hidden>
+  <div class="glossary-shell">
+    <header class="glossary-header">
+      <div><div class="eyebrow">本地词典</div><h2 id="glossary-title">术语表</h2></div>
+      <button class="icon-btn" id="glossary-close" type="button" aria-label="关闭术语表">×</button>
+    </header>
+    <div class="glossary-body">
+      <section class="glossary-browser">
+        <label class="glossary-search-label" for="glossary-search">搜索术语</label>
+        <input id="glossary-search" class="glossary-search" type="search" placeholder="英文或中文释义">
+        <div id="glossary-list" class="glossary-list" aria-live="polite"></div>
+      </section>
+      <form id="glossary-form" class="glossary-form">
+        <div><div class="eyebrow">新增或覆盖</div><h3>自定义术语</h3></div>
+        <label>英文词条<input id="glossary-word" name="word" required maxlength="120" placeholder="例如 frequency"></label>
+        <label>词性<input id="glossary-pos" name="pos" maxlength="40" placeholder="例如 n."></label>
+        <label>中文释义<input id="glossary-zh" name="zh" required maxlength="240" placeholder="例如 频率"></label>
+        <label>说明<textarea id="glossary-note" name="note" maxlength="800" rows="4" placeholder="可选：补充上下文或使用约束"></textarea></label>
+        <p id="glossary-message" class="glossary-message" aria-live="polite">保存后会立即参与术语识别与本地翻译。</p>
+        <button class="btn" type="submit">保存到 glossary.json</button>
+      </form>
+    </div>
+  </div>
+</section>
 
 <script type="module" src="/static/app.js"></script>
 </body>

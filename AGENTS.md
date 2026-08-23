@@ -4,7 +4,7 @@
 
 ## 运行命令
 
-- 启动服务：`python server.py` → http://127.0.0.1:5197（Flask，仅绑定本地）
+- 启动服务：`python server.py` → 默认 http://127.0.0.1:5197（Flask，仅绑定本地）；端口不可绑定时自动回退到 5800 等备用端口，以终端打印地址为准。
 - 生成示例 PDF：`python make_sample.py` → 生成 `docs/sample_spec.pdf`
 - 初始化环境：`uv venv --python 3.11 .venv`，然后 `uv pip install --python .venv\Scripts\python.exe -r requirements.txt .\vendor\en_core_web_sm-3.8.0-py3-none-any.whl`
 - `server.py` 在直接运行且当前解释器缺 Flask 时，会自动切换到已有的项目 `.venv`；没有 `.venv` 则打印上述安装命令。
@@ -41,10 +41,12 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 
 ## 前端实现要点（`static/viewer.js` + `static/style.css`，2026-08 更新）
 
-### 渲染：canvas + 透明文本层 + 坐标标记层
+### 渲染：canvas + 透明文本层 + Link 注解层 + 字符标记层
 
 - `static/app.js` 依次加载模块版 PDF.js、`pdf_helpers.js` 和 `viewer.js`；`renderPage` 使用 PDF.js 6 的 `TextLayer` 类生成透明文本层。
-- 文本层保留原生文本选择/复制；`.sentence-mark-layer` 按真实词坐标绘制完整行级高亮，且 `pointer-events:none`，不会挡住选择。
+- 文本层保留原生文本选择/复制；必须保留 PDF.js 6 的 `--total-scale-factor/--text-scale-factor/--font-height/--scale-x` CSS，缺失会导致透明文字宽度和高亮越过页面右侧。
+- `.sentence-mark-layer` 使用每个 TextItem 内的字符偏移和 DOM `Range.getClientRects()` 绘制真实字形范围，坐标估算只作为损坏文本层的回退。
+- 每页还会读取 Link annotation，生成只支持内部目标、安全 named action 和 HTTP(S) 的 `.annotation-layer`；不得执行 PDF JavaScript。
 - 已废弃整页 `.hover-layer/.sent` 覆盖层（会挡住原生文本选择，是"无法复制"的根因），相关 CSS 已从 `style.css` 移除。
 
 ### 句子切分（`buildSentences` / `isSentenceEnd`）
@@ -55,16 +57,16 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 
 ### 命中映射（`wireTextLayer`）
 
-- 唯一文本子串仍用于把简单 span 直接归入句子；整页文本层同时用词坐标矩形做事件委托。
-- 当一个 span 横跨多个句子或文本匹配为零时，`mousemove/click` 按指针落点命中对应句子，避免整块失去交互。
-- 视觉高亮完全使用前端词坐标生成的标记层，不依赖 textLayer 约 13px 的字体基线偏移。
+- `alignTextDivs` 必须按 TextItem 和 textLayer span 的实际文本顺序匹配，不能仅按数组下标对齐（marked content/空项会造成整体偏移）。
+- 同一个 span 可包含多句；不得给 span 绑定某个固定句子的点击事件，`mousemove/click` 统一按字符矩形落点命中。
+- 同一行的不连续字符范围保持多个矩形，不允许用最左/最右坐标填满中间空白。
 
 ### 预览、选中与侧边栏交互
 
 - 悬停只设置 `.is-preview` 浅色高亮，**不请求后端**；单击后设置 `.is-selected` 并调用 `/api/analyze`，结果在右侧栏持久展示。
 - `previewTarget` 与 `selectedTarget` 分离；选中不会随鼠标移开消失。切换句子时移除旧选中类，请求序号阻止旧异步响应覆盖新结果。
-- 分析栏默认在右侧，支持左/右/上/下停靠或关闭，保存宽高与位置；窄屏按所选方向显示抽屉。
-- 设置提供浅色、暗色、护眼主题和简洁/标准/详细三档解析密度；顶栏目录按钮读取 PDF outline。
+- 分析栏默认在右侧，支持左/右/上/下停靠或关闭，保存宽高与位置；目录是独立持久停靠栏，分析栏位于左侧时布局为“目录 | 分析 | PDF”。窄屏时两种抽屉互斥。
+- 设置提供浅色、暗色、护眼主题和简洁/标准/详细三档解析密度；目录跳转后保持打开并标记活动项。
 - `Esc`、关闭按钮或顶栏收起会清除选中并关闭分析栏；拖选文字时 `hasTextSelection()` 抑制句子选择。
 - 树节点悬停时使用后端 `segments` 在右栏原句中精确标记对应片段；PDF 文本层仍保持整句高亮，避免破坏原生复制。
 
@@ -72,11 +74,12 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 
 - `parse/clauser.py` → `parse_sentence(s: str) -> ParsedSentence(text, clauses, main_clause_id, engine, warnings)`。
   - `ClauseNode` 带 `parent_id/order/text/start/end/segments/kind/relation/label/marker/grammar/confidence/warnings`。
-  - `Grammar` 带 `subject/predicate/object/agent/complement/voice/negated/modality`。
+  - `Grammar` 除基础主干外，还带直接/间接宾语、助动词、短语动词、时态/体/语气、规范强度、修饰语、介词短语、并列结构、先行词和多源一致性证据。
 - `parse_sentence` 优先走 spaCy，不可用则返回同构的 `rule-fallback` 树；`term_candidates` 是仅供后端词典抽取使用的原词/lemma 对。
 - `parse/spacy_parser.py` → `parse_spacy(text) -> ParsedSentence | None`；模块级 `_SPACY_OK` 指示模型是否就绪。
 - `parse/glossary.py` → `Glossary.lookup(word) -> dict | None`；**未命中返回 `None`**（调用方应做"未收录"兜底）。
   - `BUILTIN` 内置词典 + 可选用户词典 `glossary.json`（用户优先级高）；服务按 mtime/大小自动热重载并清除旧分析缓存。
+- `parse/translator.py` → `translate_sentence(parsed, glossary)`；返回完整和逐分句的本地结构辅助译文，明确附带能力边界警告。
 
 ## API 契约（POST `/api/analyze`）
 
@@ -88,7 +91,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 ```json
 {
   "results": [{
-    "schema_version": 2,
+    "schema_version": 3,
     "text": "...",
     "engine": "spacy",
     "main_clause_id": "c0",
@@ -98,13 +101,13 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
       "grammar": { "subject": "...", "predicate": "...", "voice": "active", "negated": false }
     }],
     "terms": [{ "word": "...", "pos": "...", "zh": "...", "note": "..." }],
-    "translation": null,
+    "translation": { "text": "...", "engine": "structured-local", "clauses": [], "warnings": [] },
     "warnings": []
   }]
 }
 ```
 
-`translation` 是未来本地翻译适配器的稳定扩展点；未配置模型时必须为 `null`。`terms` 和 `warnings` 可能为空数组。
+`translation` 由完全离线的结构翻译器生成，属于辅助译文而非生成式模型输出；`terms` 和 `warnings` 可能为空数组。
 
 ## 已知坑
 
@@ -132,7 +135,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 
 ### 做得好的地方
 
-- **职责分离干净**：坐标权威全在前端，后端只做纯文本分析；schema v2 将树结构、语法主干、术语与未来翻译扩展点分开。
+- **职责分离干净**：坐标权威全在前端，后端只做纯文本分析；schema v3 将树结构、丰富语法、术语和本地译文分开。
 - **离线优先**：spaCy 本地模型 + vendor 的 pdf.js，无外部网络依赖，隐私与可用性都好；解析引擎带纯规则回退，健壮。
 - **零构建、零部署成本**：单个 Flask 入口 + 静态文件，`python server.py` 即可运行，适合个人本地工具。
 - **阅读交互稳定**：透明文本层保留复制；悬停不触发解析，单击结果持久显示，避免浮层遮挡正文或吞掉指针。
@@ -142,6 +145,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - **断句仍是启发式**：已使用 `TextItem` 原始顺序、`hasEOL`、段间距和跨页状态，但复杂表格、页眉页脚及 PDF 自身错误阅读顺序仍会误判。
 - **跨页规则偏保守**：能处理小写续接和跨页断词，但下一页以专有名词/大写缩写续接时不会自动合并，只会提示疑似截断。
 - **模型边界**：`en_core_web_sm` 对高度歧义或省略结构仍可能误标；`confidence` 是启发式等级，不是统计校准值。
+- **翻译边界**：当前是术语表和语法规则驱动的结构辅助译文；复杂修辞和领域外词汇可能保留英文。
 - **超大文档性能**：新文件可取消旧加载、每页间会让出事件循环，但 canvas 与文本层仍会完整保留，尚未做可见页虚拟化。
 - **解析超时**：spaCy 超长句仍是 CPU 密集任务，目前只有输入长度/请求体限制，没有进程级硬超时。
 - **真实浏览器自动化**：本轮已人工完成真实浏览器冒烟，但仓库测试仍以 Node 模拟 DOM 为主，尚未引入 Playwright 端到端套件。
@@ -152,4 +156,4 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 2. **超大 PDF 虚拟化**：只保留可见页附近的 canvas/textLayer，跨页文本状态与视觉渲染生命周期分离。
 3. **解析隔离与超时**：把 spaCy 调用放入可取消的工作进程，为超长句提供明确降级提示。
 4. **复杂版面语料**：补真实多栏、表格、页眉页脚和跨页大写续接 PDF，用样本驱动而非继续堆叠无数据启发式。
-5. **翻译与语料扩展**：在 `translation` 扩展点接入本地小模型；先锁定术语，再做否定、情态和数值一致性校验。
+5. **翻译模型扩展**：在现有 `structured-local` 适配器之后增加可选本地小模型，同时保留术语、否定、情态和数值一致性校验。

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from parse.clauser import parse_sentence, split_sentences
 from parse.glossary import Glossary
+from parse.translator import translate_text
 import parse.spacy_parser as spacy_parser
 import server
 
@@ -31,6 +32,8 @@ class SentenceParserTests(unittest.TestCase):
         self.assertEqual(main.grammar.voice, "passive")
         self.assertEqual(relative.parent_id, main.id)
         self.assertEqual(relative.grammar.agent, "the controller")
+        self.assertIn("spacy-dependency", main.grammar.evidence_sources)
+        self.assertEqual(main.grammar.agreement, "corroborated")
 
     def test_repairs_small_model_noun_root_mistag(self):
         parsed = parse_sentence(
@@ -81,6 +84,14 @@ class SentenceParserTests(unittest.TestCase):
         cause_clause = next(clause for clause in parsed.clauses if clause.relation == "cause")
         self.assertEqual(cause_clause.parent_id, time_clause.id)
 
+    def test_requirement_strength_and_rich_grammar(self):
+        parsed = parse_sentence("The controller must not ignore the pending request during calibration.")
+        main = next(clause for clause in parsed.clauses if clause.id == parsed.main_clause_id)
+        self.assertEqual(main.grammar.requirement_level, "prohibited")
+        self.assertTrue(main.grammar.negated)
+        self.assertIn("must", main.grammar.auxiliaries)
+        self.assertTrue(main.grammar.prepositional_phrases)
+
     def test_rule_fallback_uses_same_schema(self):
         old_ok = spacy_parser._SPACY_OK
         try:
@@ -114,6 +125,13 @@ class GlossaryTests(unittest.TestCase):
             self.assertTrue(glossary.lookup("flushed")["variant"])
             self.assertIsNone(glossary.lookup("not_in_dictionary"))
 
+    def test_structured_translation_preserves_identifiers_and_modality(self):
+        translated = translate_text("The controller must not ignore MR28 OP[5].", Glossary())
+        self.assertIn("控制器", translated)
+        self.assertIn("不得", translated)
+        self.assertIn("MR28", translated)
+        self.assertIn("OP[5]", translated)
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
@@ -121,7 +139,20 @@ class ApiTests(unittest.TestCase):
         self.client = server.app.test_client()
         server._analyze_sentence.cache_clear()
 
-    def test_analyze_contract_v2(self):
+    def test_local_port_selection_falls_back_when_default_is_reserved(self):
+        with patch.dict("os.environ", {}, clear=False), patch(
+            "server._can_bind_local", side_effect=lambda port: port == 5800
+        ):
+            self.assertEqual(server._select_local_port(), 5800)
+
+    def test_local_port_selection_honors_environment_override(self):
+        with patch.dict("os.environ", {"PARSE_SPEC_PORT": "6800"}), patch(
+            "server._can_bind_local", return_value=True
+        ) as can_bind:
+            self.assertEqual(server._select_local_port(), 6800)
+            can_bind.assert_called_once_with(6800)
+
+    def test_analyze_contract_v3(self):
         response = self.client.post(
             "/api/analyze",
             json={"sentences": ["The data is latched into the register."]},
@@ -141,10 +172,13 @@ class ApiTests(unittest.TestCase):
                 "warnings",
             },
         )
-        self.assertEqual(result["schema_version"], 2)
-        self.assertIsNone(result["translation"])
+        self.assertEqual(result["schema_version"], 3)
+        self.assertEqual(result["translation"]["engine"], "structured-local")
+        self.assertTrue(result["translation"]["text"])
+        self.assertTrue(result["translation"]["clauses"])
         self.assertEqual(result["clauses"][0]["id"], result["main_clause_id"])
         self.assertIn("grammar", result["clauses"][0])
+        self.assertIn("evidence_sources", result["clauses"][0]["grammar"])
         self.assertIn("segments", result["clauses"][0])
 
     def test_uses_spacy_lemma_for_irregular_glossary_hit(self):
@@ -211,6 +245,76 @@ class ApiTests(unittest.TestCase):
             server._glossary = old_glossary
             server._glossary_signature = old_signature
             server._analyze_sentence.cache_clear()
+
+    def test_glossary_api_lists_and_saves_user_entries(self):
+        old_path = server._glossary_path
+        old_glossary = server._glossary
+        old_signature = server._glossary_signature
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                server._glossary_path = Path(directory) / "glossary.json"
+                server._glossary_signature = None
+                listed = self.client.get("/api/glossary")
+                self.assertEqual(listed.status_code, 200)
+                self.assertTrue(any(entry["word"] == "protocol" for entry in listed.get_json()["entries"]))
+
+                saved = self.client.post(
+                    "/api/glossary",
+                    json={"word": "frequency", "pos": "n.", "zh": "频率", "note": "每秒周期数"},
+                )
+                self.assertEqual(saved.status_code, 200)
+                self.assertEqual(saved.get_json()["entry"]["source"], "custom")
+                stored = json.loads(server._glossary_path.read_text(encoding="utf-8"))
+                self.assertEqual(stored["frequency"]["zh"], "频率")
+
+                listed_again = self.client.get("/api/glossary").get_json()["entries"]
+                frequency = next(entry for entry in listed_again if entry["word"] == "frequency")
+                self.assertEqual(frequency["source"], "custom")
+        finally:
+            server._glossary_path = old_path
+            server._glossary = old_glossary
+            server._glossary_signature = old_signature
+            server._analyze_sentence.cache_clear()
+
+    def test_bookmark_api_reads_writes_and_removes_project_file_entries(self):
+        old_path = server._bookmarks_path
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                server._bookmarks_path = Path(directory) / "bookmarks.json"
+                document_key = "spec.pdf:1234"
+                listed = self.client.get("/api/bookmarks", query_string={"document_key": document_key})
+                self.assertEqual(listed.status_code, 200)
+                self.assertEqual(listed.get_json()["bookmarks"], [])
+
+                bookmark = {
+                    "id": "b1",
+                    "pageNum": 8,
+                    "sentenceIndex": 2,
+                    "text": "The controller waits.",
+                    "createdAt": "2026-08-23T00:00:00.000Z",
+                }
+                saved = self.client.post(
+                    "/api/bookmarks",
+                    json={"document_key": document_key, "bookmarks": [bookmark]},
+                )
+                self.assertEqual(saved.status_code, 200)
+                stored = json.loads(server._bookmarks_path.read_text(encoding="utf-8"))
+                self.assertEqual(stored[document_key][0]["pageNum"], 8)
+
+                invalid = self.client.post(
+                    "/api/bookmarks",
+                    json={"document_key": document_key, "bookmarks": [{**bookmark, "pageNum": 0}]},
+                )
+                self.assertEqual(invalid.status_code, 400)
+
+                removed = self.client.post(
+                    "/api/bookmarks",
+                    json={"document_key": document_key, "bookmarks": []},
+                )
+                self.assertEqual(removed.status_code, 200)
+                self.assertNotIn(document_key, json.loads(server._bookmarks_path.read_text(encoding="utf-8")))
+        finally:
+            server._bookmarks_path = old_path
 
 
 if __name__ == "__main__":

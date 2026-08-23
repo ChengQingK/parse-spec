@@ -1,0 +1,11 @@
+{
+  "DDR_PHY_Interface_Specification_v5_2.pdf:5135467": [
+    {
+      "id": "1787502055442:h95tb3",
+      "pageNum": 45,
+      "sentenceIndex": 25,
+      "text": "The t phy_wrcsgap timing parameter specifies the minimum number of additional Data clocks required between commands when changing the target chip select driven on the dfi_wrdata_cs signal and defines a minimum additional delay between commands when changing the target chip select as required by the PHY.",
+      "createdAt": "2026-08-23T16:20:55.442Z"
+    }
+  ]
+}

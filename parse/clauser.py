@@ -23,6 +23,20 @@ class Grammar:
     voice: str = "active"
     negated: bool = False
     modality: str = ""
+    direct_object: str = ""
+    indirect_object: str = ""
+    auxiliaries: list[str] = field(default_factory=list)
+    particles: list[str] = field(default_factory=list)
+    tense: str = ""
+    aspect: str = ""
+    mood: str = ""
+    requirement_level: str = "unspecified"
+    modifiers: list[str] = field(default_factory=list)
+    prepositional_phrases: list[str] = field(default_factory=list)
+    coordination: list[str] = field(default_factory=list)
+    antecedent: str = ""
+    evidence_sources: list[str] = field(default_factory=list)
+    agreement: str = "single-source"
 
 
 @dataclass(slots=True)
@@ -215,6 +229,33 @@ def structure(text: str) -> tuple[str, str]:
     return " ".join(verb_tokens), subject
 
 
+def _rule_grammar(text: str, subject: str, predicate: str) -> Grammar:
+    lower = text.lower()
+    modal_match = re.search(r"\b(shall|must|should|may|might|can|could|will|would)\b", lower)
+    modal = modal_match.group(1) if modal_match else ""
+    negated = bool(re.search(r"\b(?:not|never|neither|nor)\b", lower))
+    if modal in {"shall", "must"}:
+        requirement = "prohibited" if negated else "mandatory"
+    elif modal == "should":
+        requirement = "recommended"
+    elif modal in {"may", "can", "could"}:
+        requirement = "permitted"
+    else:
+        requirement = "unspecified"
+    passive = bool(re.search(r"\b(?:is|are|was|were|be|been|being)\s+(?:\w+ly\s+)?\w+(?:ed|en)\b", lower))
+    return Grammar(
+        subject=subject,
+        predicate=predicate,
+        voice="passive" if passive else "active",
+        negated=negated,
+        modality=modal,
+        auxiliaries=[modal] if modal else [],
+        requirement_level=requirement,
+        evidence_sources=["technical-rule"],
+        agreement="rule-fallback",
+    )
+
+
 def _locate_chunks(source: str, chunks: list[Chunk]) -> list[tuple[Chunk, int, int]]:
     located: list[tuple[Chunk, int, int]] = []
     cursor = 0
@@ -258,7 +299,7 @@ def _fallback_parse(sentence: str, reason: str = "spaCy 不可用，已使用规
             kind="main",
             relation="main",
             label=_RELATION_LABELS["main"],
-            grammar=Grammar(subject=subject, predicate=predicate),
+            grammar=_rule_grammar(main_text, subject, predicate),
             confidence=0.45,
             warnings=["当前结果由纯规则回退生成，结构精度有限"],
         )
@@ -286,7 +327,7 @@ def _fallback_parse(sentence: str, reason: str = "spaCy 不可用，已使用规
                 relation=relation,
                 label=_RELATION_LABELS[relation],
                 marker=chunk.marker,
-                grammar=Grammar(subject=subject, predicate=predicate),
+                grammar=_rule_grammar(chunk.text, subject, predicate),
                 confidence=0.4,
                 warnings=warnings,
             )

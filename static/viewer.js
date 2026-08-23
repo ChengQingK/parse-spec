@@ -4,38 +4,75 @@ const pdfjsLib = globalThis.pdfjsLib;
 if (!pdfjsLib) throw new Error("PDF.js 尚未加载");
 const pdfHelpers = globalThis.__parseSpecPdfHelpers;
 if (!pdfHelpers) throw new Error("PDF 阅读辅助模块尚未加载");
-const { buildSentenceLineRects, resolveOutlinePage, targetAtPoint } = pdfHelpers;
+const {
+  buildSentenceDomRects,
+  buildSentenceLineRects,
+  resolvePdfDestination,
+  targetAtPoint,
+} = pdfHelpers;
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdf.worker.min.mjs";
 
 const S = 1.4;
 const fileInput = document.getElementById("file");
 const emptyFileInput = document.getElementById("file-empty");
 const pagesEl = document.getElementById("pages");
+const documentPane = document.getElementById("doc");
 const placeholder = document.getElementById("placeholder");
 const workspace = document.getElementById("workspace");
 const analysisContent = document.getElementById("analysis-content");
+const analysisPanel = document.getElementById("analysis-panel");
 const panelToggle = document.getElementById("panel-toggle");
 const panelClose = document.getElementById("panel-close");
 const panelResizer = document.getElementById("panel-resizer");
 const docMeta = document.getElementById("doc-meta");
+const recentDocs = document.getElementById("recent-docs");
+const recentDocsMenu = document.getElementById("recent-docs-menu");
+const recentDocsList = document.getElementById("recent-docs-list");
 const settingsToggle = document.getElementById("settings-toggle");
 const settingsPopover = document.getElementById("settings-popover");
 const settingsClose = document.getElementById("settings-close");
-const themeSelect = document.getElementById("theme-select");
+const themeCycle = document.getElementById("theme-cycle");
+const themeIcon = document.getElementById("theme-icon");
 const depthSelect = document.getElementById("depth-select");
+const structureSelect = document.getElementById("structure-select");
 const positionSelect = document.getElementById("position-select");
 const settingsReset = document.getElementById("settings-reset");
 const outlineToggle = document.getElementById("outline-toggle");
 const outlinePanel = document.getElementById("outline-panel");
 const outlineClose = document.getElementById("outline-close");
 const outlineContent = document.getElementById("outline-content");
+const bookmarkToggle = document.getElementById("bookmark-toggle");
+const bookmarkPanel = document.getElementById("bookmark-panel");
+const bookmarkClose = document.getElementById("bookmark-close");
+const bookmarkAdd = document.getElementById("bookmark-add");
+const bookmarkContent = document.getElementById("bookmark-content");
+const navResizer = document.getElementById("nav-resizer");
+const glossaryToggle = document.getElementById("glossary-toggle");
+const glossaryDialog = document.getElementById("glossary-dialog");
+const glossaryClose = document.getElementById("glossary-close");
+const glossarySearch = document.getElementById("glossary-search");
+const glossaryList = document.getElementById("glossary-list");
+const glossaryForm = document.getElementById("glossary-form");
+const glossaryWord = document.getElementById("glossary-word");
+const glossaryPos = document.getElementById("glossary-pos");
+const glossaryZh = document.getElementById("glossary-zh");
+const glossaryNote = document.getElementById("glossary-note");
+const glossaryMessage = document.getElementById("glossary-message");
 
 const SETTINGS_KEY = "parse-spec:settings";
-const DEFAULT_SETTINGS = Object.freeze({ theme: "light", analysisDepth: "standard", panelPosition: "right" });
+const OUTLINE_WIDTH_KEY = "parse-spec:outline-width";
+const LEGACY_BOOKMARKS_KEY = "parse-spec:bookmarks";
+const DEFAULT_SETTINGS = Object.freeze({ theme: "light", analysisDepth: "standard", structureView: "bracket", panelPosition: "right" });
 const VALID_THEMES = new Set(["light", "dark", "eye"]);
 const VALID_DEPTHS = new Set(["concise", "standard", "detailed"]);
+const VALID_STRUCTURE_VIEWS = new Set(["bracket", "linked"]);
 const VALID_POSITIONS = new Set(["left", "right", "top", "bottom", "off"]);
+const THEME_ORDER = ["light", "dark", "eye"];
+const THEME_LABELS = Object.freeze({ light: "浅色", dark: "暗色", eye: "护眼色" });
+const THEME_ICONS = Object.freeze({ light: "☀", dark: "☾", eye: "◐" });
 const sentenceResults = new Map();
+const pageSentenceTargets = new Map();
+const recentDocuments = [];
 
 let currentPdf = null;
 let activeLoadingTask = null;
@@ -45,6 +82,13 @@ let selectedTarget = null;
 let requestSerial = 0;
 let panelCollapsed = false;
 let resizeStart = null;
+let navResizeStart = null;
+let currentDocumentKey = "no-document";
+let bookmarkCacheKey = null;
+let bookmarkCache = [];
+let bookmarkLoadSerial = 0;
+let glossaryEntries = [];
+let activeRecentDocumentKey = null;
 let uiSettings = loadSettings();
 let panelPosition = uiSettings.panelPosition;
 
@@ -58,6 +102,7 @@ function loadSettings() {
     return {
       theme: VALID_THEMES.has(parsed.theme) ? parsed.theme : DEFAULT_SETTINGS.theme,
       analysisDepth: VALID_DEPTHS.has(parsed.analysisDepth) ? parsed.analysisDepth : DEFAULT_SETTINGS.analysisDepth,
+      structureView: VALID_STRUCTURE_VIEWS.has(parsed.structureView) ? parsed.structureView : DEFAULT_SETTINGS.structureView,
       panelPosition: VALID_POSITIONS.has(parsed.panelPosition) ? parsed.panelPosition : DEFAULT_SETTINGS.panelPosition,
     };
   } catch (_ignored) {
@@ -72,8 +117,8 @@ function saveSettings() {
 }
 
 function syncSettingsControls() {
-  if (themeSelect) themeSelect.value = uiSettings.theme;
   if (depthSelect) depthSelect.value = uiSettings.analysisDepth;
+  if (structureSelect) structureSelect.value = uiSettings.structureView;
   if (positionSelect) positionSelect.value = uiSettings.panelPosition;
 }
 
@@ -81,8 +126,82 @@ function setTheme(theme, persist = true) {
   const next = VALID_THEMES.has(theme) ? theme : DEFAULT_SETTINGS.theme;
   uiSettings.theme = next;
   if (document.documentElement && document.documentElement.dataset) document.documentElement.dataset.theme = next;
-  if (themeSelect) themeSelect.value = next;
+  if (themeIcon) themeIcon.textContent = THEME_ICONS[next];
+  if (themeCycle) {
+    const nextTheme = THEME_ORDER[(THEME_ORDER.indexOf(next) + 1) % THEME_ORDER.length];
+    themeCycle.setAttribute("aria-label", `当前为${THEME_LABELS[next]}主题，切换为${THEME_LABELS[nextTheme]}主题`);
+    themeCycle.setAttribute("title", `当前：${THEME_LABELS[next]} · 点击切换为${THEME_LABELS[nextTheme]}`);
+  }
   if (persist) saveSettings();
+}
+
+function cycleTheme() {
+  const index = THEME_ORDER.indexOf(uiSettings.theme);
+  setTheme(THEME_ORDER[(index + 1) % THEME_ORDER.length]);
+}
+
+function recentDocumentKey(file) {
+  return `${String(file && file.name || "")}:${Number(file && file.size) || 0}:${Number(file && file.lastModified) || 0}`;
+}
+
+function renderRecentDocuments() {
+  if (!recentDocsList) return;
+  if (!recentDocuments.length) {
+    recentDocsList.innerHTML = '<div class="recent-docs-empty">暂无最近文档</div>';
+    return;
+  }
+  recentDocsList.innerHTML = recentDocuments.map((entry) => {
+    const current = entry.key === activeRecentDocumentKey;
+    return `<button class="recent-doc-item" type="button" role="menuitem" data-recent-key="${esc(entry.key)}"${current ? ' aria-current="true"' : ""}>`
+      + `<span class="recent-doc-item-name">${esc(entry.file.name)}</span>`
+      + (current ? '<span class="recent-doc-current">当前</span>' : "")
+      + "</button>";
+  }).join("");
+}
+
+function rememberRecentDocument(file) {
+  const key = recentDocumentKey(file);
+  const oldIndex = recentDocuments.findIndex((entry) => entry.key === key);
+  if (oldIndex >= 0) recentDocuments.splice(oldIndex, 1);
+  recentDocuments.unshift({ key, file });
+  if (recentDocuments.length > 8) recentDocuments.length = 8;
+  activeRecentDocumentKey = key;
+  renderRecentDocuments();
+  return key;
+}
+
+function openRecentDocuments() {
+  if (!recentDocsMenu || !docMeta) return;
+  closeSettings();
+  renderRecentDocuments();
+  recentDocsMenu.hidden = false;
+  docMeta.setAttribute("aria-expanded", "true");
+}
+
+function closeRecentDocuments() {
+  if (!recentDocsMenu || !docMeta) return;
+  recentDocsMenu.hidden = true;
+  docMeta.setAttribute("aria-expanded", "false");
+}
+
+function toggleRecentDocuments() {
+  if (!recentDocsMenu || recentDocsMenu.hidden) openRecentDocuments();
+  else closeRecentDocuments();
+}
+
+function switchRecentDocument(key) {
+  const entry = recentDocuments.find((item) => item.key === key);
+  closeRecentDocuments();
+  if (!entry || (entry.key === activeRecentDocumentKey && (currentPdf || activeLoadingTask))) return;
+  openPdf(entry.file);
+}
+
+function setDocumentLabel(file, status = "") {
+  if (!docMeta || !file) return;
+  docMeta.textContent = file.name;
+  const description = status ? `${file.name} · ${status}` : file.name;
+  docMeta.setAttribute("title", description);
+  docMeta.setAttribute("aria-label", status ? description : `${file.name}，打开最近文档`);
 }
 
 function setAnalysisDepth(depth, persist = true) {
@@ -93,8 +212,17 @@ function setAnalysisDepth(depth, persist = true) {
   refreshSelectedAnalysis(false);
 }
 
+function setStructureView(view, persist = true) {
+  const next = VALID_STRUCTURE_VIEWS.has(view) ? view : DEFAULT_SETTINGS.structureView;
+  uiSettings.structureView = next;
+  if (structureSelect) structureSelect.value = next;
+  if (persist) saveSettings();
+  refreshSelectedAnalysis(false);
+}
+
 function openSettings() {
   if (!settingsPopover || !settingsToggle) return;
+  closeRecentDocuments();
   settingsPopover.hidden = false;
   settingsToggle.setAttribute("aria-expanded", "true");
 }
@@ -114,6 +242,7 @@ function resetSettings() {
   uiSettings = { ...DEFAULT_SETTINGS };
   setTheme(uiSettings.theme, false);
   setAnalysisDepth(uiSettings.analysisDepth, false);
+  setStructureView(uiSettings.structureView, false);
   setPanelPosition(uiSettings.panelPosition, false, true);
   saveSettings();
   syncSettingsControls();
@@ -125,13 +254,21 @@ function isSentenceEnd(word, next, fontSize, newRow) {
   const wordStr = word.text;
   if (newRow && next && (next.y0 - word.y0) > fontSize * 1.4 && /^[A-Z0-9"'(]/.test(next.text)) return true;
   if (!/[.!?]["')\]]*$/.test(wordStr)) return false;
-  if (/^(e\.g\.?|i\.e\.?|etc\.?|vs\.?|viz\.?|Dr\.?|Mr\.?|Mrs\.?|Ms\.?|Prof\.?|St\.?|No\.?|Fig\.?|Ref\.?|Sec\.?|approx\.?)$/i.test(wordStr)) return false;
+  if (/^(e\.g\.?|i\.e\.?|etc\.?|vs\.?|viz\.?|Dr\.?|Mr\.?|Mrs\.?|Ms\.?|Prof\.?|St\.?|No\.?|Fig\.?|Ref\.?|Sec\.?|Eq\.?|Rev\.?|Tab\.?|approx\.?)$/i.test(wordStr)) return false;
+  if (/^(?:[A-Z]\.){2,}$/i.test(wordStr)) return false;
   if (!next) return true;
   if (newRow) return true;
   const gap = next.x0 - word.x1;
   const bigGap = gap > Math.max(6, fontSize * 0.35);
   const capStart = /^[A-Z"'(]/.test(next.text);
-  return bigGap && capStart;
+  // 真实 SPEC 常把“句末 + 下一句开头”放在同一个 TextItem 内，此时视觉间距只有普通空格。
+  // 字符边界能证明二者来自同一文本块，直接按句号 + 大写开头切分。
+  const sameTextItemBoundary = Number.isInteger(word.itemIndex)
+    && word.itemIndex === next.itemIndex
+    && Number.isInteger(word.charEnd)
+    && Number.isInteger(next.charStart)
+    && next.charStart > word.charEnd;
+  return capStart && (bigGap || sameTextItemBoundary);
 }
 
 function buildSentences(words) {
@@ -179,28 +316,30 @@ function toWords(items, viewport, scale) {
   const words = [];
   for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
     const item = items[itemIndex];
-    const raw = String(item.str || "").trim();
-    if (!raw) continue;
+    const raw = String(item.str || "");
+    if (!raw.trim()) continue;
     const transform = item.transform || [1, 0, 0, 1, 0, 0];
     const point = viewport.convertToViewportPoint(transform[4], transform[5]);
     const fontSize = Math.max(8, Math.hypot(transform[2], transform[3]) * scale);
     const itemWidth = Math.max(1, Number(item.width || raw.length * fontSize * .5) * scale);
-    const parts = raw.split(/\s+/).filter(Boolean);
-    const totalChars = Math.max(1, parts.reduce((sum, part) => sum + part.length, 0));
-    let cursorX = point[0];
+    const parts = Array.from(raw.matchAll(/\S+/g));
+    const totalChars = Math.max(1, raw.length);
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
-      const part = parts[partIndex];
-      const partWidth = itemWidth * (part.length / totalChars);
+      const match = parts[partIndex];
+      const part = match[0];
+      const partX0 = point[0] + itemWidth * (match.index / totalChars);
+      const partX1 = point[0] + itemWidth * ((match.index + part.length) / totalChars);
       words.push({
         text: part,
-        x0: cursorX,
+        x0: partX0,
         y0: point[1] - fontSize,
-        x1: cursorX + partWidth,
+        x1: partX1,
         y1: point[1],
         itemIndex,
+        charStart: match.index,
+        charEnd: match.index + part.length,
         hasEOL: !!item.hasEOL && partIndex === parts.length - 1,
       });
-      cursorX += partWidth + (parts.length > 1 ? itemWidth * .02 : 0);
     }
   }
   return words;
@@ -214,6 +353,8 @@ async function renderPage(pdf, pageNum, container, documentSentenceState = null)
   const wrap = document.createElement("div");
   wrap.className = "page-wrap";
   wrap.dataset.pageNumber = String(pageNum);
+  wrap.__pdfViewport = viewport;
+  wrap.style.setProperty("--scale-factor", String(Number(viewport.scale || S)));
 
   const canvas = document.createElement("canvas");
   canvas.width = Math.floor(viewport.width);
@@ -244,9 +385,119 @@ async function renderPage(pdf, pageNum, container, documentSentenceState = null)
     await pdfjsLib.renderTextLayer({ textContent, container: textLayer, viewport, textDivs }).promise;
   }
   textLayer.style.visibility = "visible";
-  wireTextLayer(textLayer, wrap, sentences, words, pageNum, textDivs, sentenceTargets);
+  const alignedTextDivs = alignTextDivs(textContent.items, textDivs);
+  wireTextLayer(textLayer, wrap, sentences, words, pageNum, alignedTextDivs, sentenceTargets, viewport.width, viewport.height);
+  await renderAnnotationLayer(page, viewport, wrap, pdf);
   if (typeof page.cleanup === "function") page.cleanup();
   console.log(`P${pageNum}: ${words.length} 词, ${sentences.length} 句`);
+}
+
+function alignTextDivs(items, textDivs) {
+  const aligned = new Array((items || []).length);
+  let cursor = 0;
+  for (let itemIndex = 0; itemIndex < aligned.length; itemIndex++) {
+    const source = String(items[itemIndex] && items[itemIndex].str || "");
+    if (!source) continue;
+    const normalizedSource = source.replace(/\s+/g, " ").trim();
+    for (let divIndex = cursor; divIndex < textDivs.length; divIndex++) {
+      const span = textDivs[divIndex];
+      if (!span) continue;
+      const spanText = String(span.textContent || "");
+      const normalizedSpan = spanText.replace(/\s+/g, " ").trim();
+      const matches = spanText === source || (normalizedSource && normalizedSpan === normalizedSource)
+        || (!normalizedSource && !normalizedSpan);
+      if (!matches) continue;
+      aligned[itemIndex] = span;
+      cursor = divIndex + 1;
+      break;
+    }
+  }
+  return aligned;
+}
+
+function safeExternalUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value), window.location && window.location.href);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : null;
+  } catch (_ignored) {
+    return null;
+  }
+}
+
+function annotationRect(viewport, rect) {
+  if (!viewport || !Array.isArray(rect) || rect.length < 4) return null;
+  const first = viewport.convertToViewportPoint(rect[0], rect[1]);
+  const second = viewport.convertToViewportPoint(rect[2], rect[3]);
+  const converted = [first[0], first[1], second[0], second[1]];
+  const left = Math.max(0, Math.min(converted[0], converted[2]));
+  const top = Math.max(0, Math.min(converted[1], converted[3]));
+  const right = Math.min(viewport.width, Math.max(converted[0], converted[2]));
+  const bottom = Math.min(viewport.height, Math.max(converted[1], converted[3]));
+  return right > left && bottom > top ? { left, top, width: right - left, height: bottom - top } : null;
+}
+
+function handleNamedAction(action) {
+  if (!currentPdf || !action) return false;
+  const pageElements = document.querySelectorAll ? Array.from(document.querySelectorAll(".page-wrap[data-page-number]")) : [];
+  if (!pageElements.length) return false;
+  const paneTop = documentPane && documentPane.getBoundingClientRect ? documentPane.getBoundingClientRect().top : 0;
+  let currentIndex = pageElements.findIndex((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.bottom > paneTop + 8;
+  });
+  if (currentIndex < 0) currentIndex = pageElements.length - 1;
+  const named = String(action);
+  const target = named === "FirstPage" ? 1
+    : named === "LastPage" ? currentPdf.numPages
+      : named === "NextPage" ? Math.min(currentPdf.numPages, currentIndex + 2)
+        : named === "PrevPage" ? Math.max(1, currentIndex)
+          : null;
+  return target ? scrollToPage(target) : false;
+}
+
+async function renderAnnotationLayer(page, viewport, wrap, pdf) {
+  if (!page || typeof page.getAnnotations !== "function") return;
+  let annotations;
+  try {
+    annotations = await page.getAnnotations({ intent: "display" });
+  } catch (_ignored) {
+    return;
+  }
+  const links = (annotations || []).filter((annotation) => annotation && annotation.subtype === "Link");
+  if (!links.length) return;
+  const layer = document.createElement("div");
+  layer.className = "annotation-layer";
+  layer.setAttribute("aria-label", "PDF 链接层");
+  for (const annotation of links) {
+    const rect = annotationRect(viewport, annotation.rect);
+    if (!rect) continue;
+    const external = safeExternalUrl(annotation.url || annotation.unsafeUrl);
+    const link = document.createElement(external ? "a" : "button");
+    link.className = "annotation-link";
+    link.style.left = `${rect.left}px`;
+    link.style.top = `${rect.top}px`;
+    link.style.width = `${rect.width}px`;
+    link.style.height = `${rect.height}px`;
+    const label = String(annotation.overlaidText || annotation.contentsObj && annotation.contentsObj.str || "PDF 链接").trim();
+    link.setAttribute("aria-label", label || "PDF 链接");
+    link.title = label || "PDF 链接";
+    if (external) {
+      link.href = external;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+    } else {
+      link.type = "button";
+      link.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (annotation.dest) await navigatePdfDestination(pdf, annotation.dest);
+        else if (annotation.action) handleNamedAction(annotation.action);
+      });
+    }
+    layer.appendChild(link);
+  }
+  if (layer.children.length) wrap.appendChild(layer);
 }
 
 function yieldToBrowser() {
@@ -279,7 +530,7 @@ function createSentenceMarks(wrap, targets) {
 }
 
 function sentenceText(sentence) {
-  return (sentence || []).map((word) => word.text).join(" ").trim();
+  return (sentence || []).map((word) => word.text).join(" ").replace(/\s+([.,;:!?])/g, "$1").trim();
 }
 
 function hasTerminalPunctuation(sentence) {
@@ -350,7 +601,17 @@ function finalizeDocumentSentences(state) {
   }
 }
 
-function wireTextLayer(textLayer, wrap, sentences, words, pageNum, renderedTextDivs = [], providedTargets = null) {
+function wireTextLayer(
+  textLayer,
+  wrap,
+  sentences,
+  words,
+  pageNum,
+  renderedTextDivs = [],
+  providedTargets = null,
+  pageWidth = null,
+  pageHeight = null,
+) {
   const rowTol = 8 * S;
   const rows = [];
   for (const word of words) {
@@ -392,23 +653,39 @@ function wireTextLayer(textLayer, wrap, sentences, words, pageNum, renderedTextD
           contextWarnings: [],
         }
   ));
+  const wrapRect = wrap.getBoundingClientRect();
+  const derivedWidth = Math.max(0, ...words.map((word) => Number(word.x1) || 0));
+  const derivedHeight = Math.max(0, ...words.map((word) => Number(word.y1) || 0));
+  const width = Number.isFinite(pageWidth) ? pageWidth : Math.max(0, Number(wrapRect.width) || derivedWidth);
+  const height = Number.isFinite(pageHeight) ? pageHeight : Math.max(0, Number(wrapRect.height) || derivedHeight);
   const targets = analysisTargets.map((analysisTarget, sentenceIndex) => {
     if (!analysisTarget.locations.some((location) => location.pageNum === pageNum && location.sentenceIndex === sentenceIndex)) {
       analysisTarget.locations.push({ pageNum, sentenceIndex });
     }
+    const exactRects = buildSentenceDomRects(sentences[sentenceIndex], renderedTextDivs, wrapRect, width, height);
+    const fallbackRects = buildSentenceLineRects(sentences[sentenceIndex], rowTol).map((rect) => {
+      const left = Math.max(0, Math.min(width, rect.left));
+      const top = Math.max(0, Math.min(height, rect.top));
+      const right = Math.max(left, Math.min(width, rect.left + rect.width));
+      const bottom = Math.max(top, Math.min(height, rect.top + rect.height));
+      return { left, top, width: right - left, height: bottom - top };
+    }).filter((rect) => rect.width > 0 && rect.height > 0);
     return {
       analysisTarget,
       pageNum,
       sentenceIndex,
-      rects: buildSentenceLineRects(sentences[sentenceIndex], rowTol),
+      rects: exactRects.length ? exactRects : fallbackRects,
     };
   });
+  analysisTargets.forEach((target, sentenceIndex) => {
+    pageSentenceTargets.set(`${pageNum}:${sentenceIndex}`, target);
+  });
   const sentenceGroups = new Map(analysisTargets.map((target, sentenceIndex) => [sentenceIndex, target.spans]));
-  const wrapRect = wrap.getBoundingClientRect();
   const normalize = (value) => String(value).replace(/\s+/g, " ").trim();
   const normalizedSentences = sentenceTexts.map(normalize);
 
-  const textSpans = renderedTextDivs.length ? renderedTextDivs : Array.from(textLayer.querySelectorAll("span"));
+  const availableTextDivs = renderedTextDivs.filter(Boolean);
+  const textSpans = availableTextDivs.length ? availableTextDivs : Array.from(textLayer.querySelectorAll("span"));
   for (const span of textSpans) {
     if (span.classList.contains("endOfContent") || !span.textContent.trim()) continue;
     const spanText = normalize(span.textContent);
@@ -437,19 +714,6 @@ function wireTextLayer(textLayer, wrap, sentences, words, pageNum, renderedTextD
     sentenceGroups.get(sentenceIndex).push(span);
   }
 
-  for (const [sentenceIndex, spans] of sentenceGroups) {
-    const target = analysisTargets[sentenceIndex];
-    for (const span of spans) {
-      span.addEventListener("mouseenter", () => setPreview(target));
-      span.addEventListener("mouseleave", () => clearPreview(target));
-      span.addEventListener("click", (event) => {
-        if (hasTextSelection()) return;
-        event.__parseSpecSentenceHandled = true;
-        selectSentence(target);
-      });
-    }
-  }
-
   const eventTarget = (event) => {
     const rect = wrap.getBoundingClientRect ? wrap.getBoundingClientRect() : wrapRect;
     const localTarget = targetAtPoint(targets, Number(event.clientX) - rect.left, Number(event.clientY) - rect.top);
@@ -463,7 +727,7 @@ function wireTextLayer(textLayer, wrap, sentences, words, pageNum, renderedTextD
   });
   textLayer.addEventListener("mouseleave", () => clearPreview());
   textLayer.addEventListener("click", (event) => {
-    if (event.__parseSpecSentenceHandled || hasTextSelection()) return;
+    if (hasTextSelection()) return;
     const target = eventTarget(event);
     if (target) selectSentence(target);
   });
@@ -502,10 +766,154 @@ function toggleSentenceMarks(target, className, enabled) {
 
 /* ---------------- PDF 目录 ---------------- */
 
+function setNavigationPanel(kind) {
+  const showOutline = kind === "outline";
+  const showBookmarks = kind === "bookmarks";
+  const open = showOutline || showBookmarks;
+  if (open && isNarrowViewport() && !panelCollapsed) setPanelCollapsed(true);
+  if (outlinePanel) outlinePanel.hidden = !showOutline;
+  if (bookmarkPanel) bookmarkPanel.hidden = !showBookmarks;
+  workspace.classList.toggle("outline-open", open);
+  if (outlineToggle) outlineToggle.setAttribute("aria-expanded", String(showOutline));
+  if (bookmarkToggle) bookmarkToggle.setAttribute("aria-expanded", String(showBookmarks));
+  if (showBookmarks) void loadDocumentBookmarks();
+}
+
 function setOutlineOpen(open) {
   if (!outlinePanel || !outlineToggle) return;
-  outlinePanel.hidden = !open;
-  outlineToggle.setAttribute("aria-expanded", String(open));
+  if (open) setNavigationPanel("outline");
+  else if (!outlinePanel.hidden) setNavigationPanel(null);
+}
+
+function setBookmarksOpen(open) {
+  if (!bookmarkPanel || !bookmarkToggle) return;
+  if (open) setNavigationPanel("bookmarks");
+  else if (!bookmarkPanel.hidden) setNavigationPanel(null);
+}
+
+function clampOutlineWidth(value) {
+  return Math.max(220, Math.min(520, Math.round(Number(value) || 300)));
+}
+
+function setOutlineWidth(value, persist = false) {
+  const width = clampOutlineWidth(value);
+  workspace.style.setProperty("--outline-width", `${width}px`);
+  if (navResizer) navResizer.setAttribute("aria-valuenow", String(width));
+  if (persist) {
+    try { if (window.localStorage) window.localStorage.setItem(OUTLINE_WIDTH_KEY, String(width)); } catch (_ignored) {}
+  }
+  return width;
+}
+
+function outlineWidth() {
+  const fromStyle = parseInt(workspace.style.getPropertyValue("--outline-width"), 10);
+  return clampOutlineWidth(Number.isFinite(fromStyle) ? fromStyle : 300);
+}
+
+function restoreOutlineWidth() {
+  let saved = 300;
+  try { saved = parseInt(window.localStorage && window.localStorage.getItem(OUTLINE_WIDTH_KEY), 10) || 300; } catch (_ignored) {}
+  setOutlineWidth(saved, false);
+}
+
+function requestUiFrame(callback) {
+  const schedule = window.requestAnimationFrame || ((next) => setTimeout(next, 0));
+  return schedule(callback);
+}
+
+function measuredRect(element, fallbackWidth = 0, fallbackHeight = 0) {
+  const rect = element && element.getBoundingClientRect ? element.getBoundingClientRect() : {};
+  const left = Number(rect.left) || 0;
+  const top = Number(rect.top) || 0;
+  const width = Number(rect.width) || fallbackWidth;
+  const height = Number(rect.height) || fallbackHeight;
+  return {
+    left,
+    top,
+    width,
+    height,
+    right: Number.isFinite(Number(rect.right)) ? Number(rect.right) : left + width,
+    bottom: Number.isFinite(Number(rect.bottom)) ? Number(rect.bottom) : top + height,
+  };
+}
+
+function clearLiveResizeStyles(element) {
+  if (!element) return;
+  element.classList.remove("is-live-resizing");
+  for (const property of ["left", "right", "top", "bottom", "width", "height"]) element.style[property] = "";
+}
+
+function finishLiveResize(panel, resizer) {
+  // 先让浏览器在侧栏仍独立悬浮时完成 PDF 网格的一次性布局，再归位侧栏。
+  requestUiFrame(() => {
+    if (workspace.getBoundingClientRect) workspace.getBoundingClientRect();
+    requestUiFrame(() => {
+      clearLiveResizeStyles(panel);
+      clearLiveResizeStyles(resizer);
+      workspace.classList.remove("is-live-resizing");
+    });
+  });
+}
+
+function applyNavOverlayWidth(state) {
+  if (!state || !state.panel) return;
+  const width = state.pendingWidth;
+  state.panel.style.left = `${state.panelRect.left}px`;
+  state.panel.style.top = `${state.panelRect.top}px`;
+  state.panel.style.width = `${width}px`;
+  state.panel.style.height = `${state.panelRect.height}px`;
+  state.resizer.style.left = `${state.panelRect.left + width}px`;
+  state.resizer.style.top = `${state.panelRect.top}px`;
+  state.resizer.style.width = `${state.resizerRect.width || 6}px`;
+  state.resizer.style.height = `${state.panelRect.height}px`;
+}
+
+function startNavResize(event) {
+  if (!workspace.classList.contains("outline-open")) return;
+  const width = outlineWidth();
+  const panel = outlinePanel && !outlinePanel.hidden ? outlinePanel : bookmarkPanel;
+  if (!panel) return;
+  navResizeStart = {
+    x: Number(event.clientX) || 0,
+    width,
+    pendingWidth: width,
+    panel,
+    panelRect: measuredRect(panel, width, workspace.clientHeight || 0),
+    resizer: navResizer,
+    resizerRect: measuredRect(navResizer, 6, workspace.clientHeight || 0),
+  };
+  workspace.classList.add("is-live-resizing");
+  panel.classList.add("is-live-resizing");
+  navResizer.classList.add("is-live-resizing");
+  applyNavOverlayWidth(navResizeStart);
+  navResizer.classList.add("is-dragging");
+  document.body.classList.add("is-resizing-x");
+  if (event.preventDefault) event.preventDefault();
+  if (navResizer.setPointerCapture && event.pointerId !== undefined) navResizer.setPointerCapture(event.pointerId);
+}
+
+function moveNavResize(event) {
+  if (!navResizeStart) return;
+  navResizeStart.pendingWidth = clampOutlineWidth(navResizeStart.width + (Number(event.clientX) || 0) - navResizeStart.x);
+  applyNavOverlayWidth(navResizeStart);
+  if (event.preventDefault) event.preventDefault();
+}
+
+function endNavResize() {
+  if (!navResizeStart) return;
+  const state = navResizeStart;
+  const pendingWidth = state.pendingWidth;
+  navResizeStart = null;
+  setOutlineWidth(pendingWidth, true);
+  navResizer.classList.remove("is-dragging");
+  document.body.classList.remove("is-resizing-x");
+  finishLiveResize(state.panel, state.resizer);
+}
+
+function resizeNavByKeyboard(event) {
+  if (!workspace.classList.contains("outline-open") || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+  event.preventDefault();
+  setOutlineWidth(outlineWidth() + (event.key === "ArrowRight" ? 16 : -16), true);
 }
 
 function setOutlineStatus(message) {
@@ -522,19 +930,345 @@ function scrollToPage(pageNum) {
   return true;
 }
 
+/* ---------------- 用户书签 ---------------- */
+
+function legacyBookmarkSets() {
+  try {
+    const parsed = JSON.parse(window.localStorage && window.localStorage.getItem(LEGACY_BOOKMARKS_KEY) || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (_ignored) { return {}; }
+}
+
+function documentBookmarks() {
+  return bookmarkCacheKey === currentDocumentKey ? bookmarkCache : [];
+}
+
+function removeLegacyDocumentBookmarks(documentKey) {
+  try {
+    if (!window.localStorage) return;
+    const all = legacyBookmarkSets();
+    delete all[documentKey];
+    if (Object.keys(all).length) window.localStorage.setItem(LEGACY_BOOKMARKS_KEY, JSON.stringify(all));
+    else if (window.localStorage.removeItem) window.localStorage.removeItem(LEGACY_BOOKMARKS_KEY);
+    else window.localStorage.setItem(LEGACY_BOOKMARKS_KEY, "{}");
+  } catch (_ignored) {}
+}
+
+function bookmarkIdentity(bookmark) {
+  return `${Number(bookmark.pageNum)}:${Number.isInteger(bookmark.sentenceIndex) ? bookmark.sentenceIndex : "page"}:${bookmark.text || ""}`;
+}
+
+async function persistDocumentBookmarks(documentKey, bookmarks) {
+  const response = await fetch("/api/bookmarks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ document_key: documentKey, bookmarks }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return Array.isArray(data.bookmarks) ? data.bookmarks : bookmarks;
+}
+
+async function loadDocumentBookmarks() {
+  if (!bookmarkContent) return [];
+  const initialLegacy = legacyBookmarkSets()[currentDocumentKey];
+  if (!currentPdf && currentDocumentKey === "no-document" && !Array.isArray(initialLegacy)) {
+    bookmarkCacheKey = currentDocumentKey;
+    bookmarkCache = [];
+    bookmarkContent.innerHTML = `<div class="outline-empty">请先打开 PDF。</div>`;
+    return [];
+  }
+  const documentKey = currentDocumentKey;
+  const loadId = ++bookmarkLoadSerial;
+  bookmarkContent.innerHTML = `<div class="outline-empty">正在读取项目书签…</div>`;
+  try {
+    const response = await fetch(`/api/bookmarks?document_key=${encodeURIComponent(documentKey)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (loadId !== bookmarkLoadSerial || documentKey !== currentDocumentKey) return [];
+    const stored = Array.isArray(data.bookmarks) ? data.bookmarks : [];
+    const legacy = documentKey === currentDocumentKey ? initialLegacy : legacyBookmarkSets()[documentKey];
+    const merged = [...stored];
+    const identities = new Set(stored.map(bookmarkIdentity));
+    if (Array.isArray(legacy)) {
+      for (const bookmark of legacy) {
+        const identity = bookmarkIdentity(bookmark);
+        if (!identities.has(identity)) {
+          identities.add(identity);
+          merged.push(bookmark);
+        }
+      }
+      const saved = await persistDocumentBookmarks(documentKey, merged);
+      if (loadId !== bookmarkLoadSerial || documentKey !== currentDocumentKey) return [];
+      merged.splice(0, merged.length, ...saved);
+      removeLegacyDocumentBookmarks(documentKey);
+    }
+    bookmarkCacheKey = documentKey;
+    bookmarkCache = merged;
+    renderBookmarks();
+    return merged;
+  } catch (error) {
+    if (loadId === bookmarkLoadSerial && documentKey === currentDocumentKey) {
+      bookmarkCacheKey = documentKey;
+      bookmarkCache = [];
+      bookmarkContent.innerHTML = `<div class="outline-empty">书签读取失败：${esc(String(error))}</div>`;
+    }
+    return [];
+  }
+}
+
+async function saveDocumentBookmarks(bookmarks) {
+  const documentKey = currentDocumentKey;
+  bookmarkCacheKey = documentKey;
+  bookmarkCache = [...bookmarks];
+  renderBookmarks();
+  try {
+    const saved = await persistDocumentBookmarks(documentKey, bookmarkCache);
+    if (documentKey === currentDocumentKey) {
+      bookmarkCache = saved;
+      renderBookmarks();
+    }
+    return true;
+  } catch (error) {
+    if (documentKey === currentDocumentKey && bookmarkContent) {
+      bookmarkContent.innerHTML = `<div class="outline-empty">书签保存失败：${esc(String(error))}</div>`;
+    }
+    return false;
+  }
+}
+
+function currentVisiblePage() {
+  if (!document.querySelectorAll) return 1;
+  const pages = Array.from(document.querySelectorAll(".page-wrap[data-page-number]"));
+  if (!pages.length) return 1;
+  const paneTop = documentPane && documentPane.getBoundingClientRect ? documentPane.getBoundingClientRect().top : 0;
+  let best = pages[0];
+  let distance = Infinity;
+  for (const page of pages) {
+    const rect = page.getBoundingClientRect();
+    const nextDistance = Math.abs(rect.top - paneTop - 8);
+    if (rect.bottom > paneTop && nextDistance < distance) { best = page; distance = nextDistance; }
+  }
+  return Number(best.dataset.pageNumber) || 1;
+}
+
+function renderBookmarks() {
+  if (!bookmarkContent) return;
+  const bookmarks = documentBookmarks();
+  if (!bookmarks.length) {
+    bookmarkContent.innerHTML = `<div class="outline-empty">尚无书签。选择一句话后添加，可精确跳回该句；未选句时记录当前页。</div>`;
+    return;
+  }
+  bookmarkContent.innerHTML = bookmarks.map((bookmark) => `
+    <div class="bookmark-item">
+      <button class="outline-item bookmark-jump" type="button" data-bookmark-action="jump" data-bookmark-id="${esc(bookmark.id)}">
+        <strong>第 ${Number(bookmark.pageNum)} 页${Number.isInteger(bookmark.sentenceIndex) ? ` · 句子 ${bookmark.sentenceIndex + 1}` : ""}</strong>
+        <small>${esc(bookmark.text || "页面书签")}</small>
+      </button>
+      <button class="bookmark-remove" type="button" data-bookmark-action="remove" data-bookmark-id="${esc(bookmark.id)}" aria-label="删除此书签">×</button>
+    </div>`).join("");
+}
+
+async function addBookmark() {
+  if (!currentPdf) {
+    if (bookmarkContent) bookmarkContent.innerHTML = `<div class="outline-empty">请先打开 PDF。</div>`;
+    return null;
+  }
+  if (bookmarkCacheKey !== currentDocumentKey) await loadDocumentBookmarks();
+  const target = selectedTarget;
+  const pageNum = target ? target.pageNum : currentVisiblePage();
+  const bookmark = {
+    id: `${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    pageNum,
+    sentenceIndex: target ? target.sentenceIndex : null,
+    text: target ? target.text : `第 ${pageNum} 页`,
+    createdAt: new Date().toISOString(),
+  };
+  const bookmarks = documentBookmarks();
+  const duplicate = bookmarks.find((item) => item.pageNum === bookmark.pageNum && item.sentenceIndex === bookmark.sentenceIndex && item.text === bookmark.text);
+  if (duplicate) return duplicate;
+  bookmarks.unshift(bookmark);
+  await saveDocumentBookmarks(bookmarks);
+  return bookmark;
+}
+
+async function removeBookmark(id) {
+  await saveDocumentBookmarks(documentBookmarks().filter((bookmark) => bookmark.id !== id));
+}
+
+function jumpToBookmark(bookmark) {
+  if (!bookmark) return false;
+  const jumped = scrollToPage(Number(bookmark.pageNum));
+  if (Number.isInteger(bookmark.sentenceIndex)) {
+    const target = pageSentenceTargets.get(`${Number(bookmark.pageNum)}:${bookmark.sentenceIndex}`);
+    if (target) selectSentence(target);
+  }
+  if (isNarrowViewport()) setBookmarksOpen(false);
+  return jumped;
+}
+
+/* ---------------- 术语表 ---------------- */
+
+function renderGlossaryEntries(query = "") {
+  if (!glossaryList) return;
+  const needle = String(query).trim().toLowerCase();
+  const visible = glossaryEntries.filter((entry) => !needle
+    || entry.word.toLowerCase().includes(needle)
+    || entry.zh.toLowerCase().includes(needle)
+    || String(entry.note || "").toLowerCase().includes(needle));
+  if (!visible.length) {
+    glossaryList.innerHTML = `<div class="outline-empty">没有匹配词条。可在右侧新增。</div>`;
+    return;
+  }
+  glossaryList.innerHTML = visible.slice(0, 400).map((entry) => `
+    <button class="glossary-entry" type="button" data-glossary-word="${esc(entry.word)}">
+      <span><strong>${esc(entry.word)}</strong><span class="glossary-source">${entry.source === "custom" ? "自定义" : "内置"}</span><br><small>${esc(entry.pos || "未标词性")}</small></span>
+      <span>${esc(entry.zh)}<br><small>${esc(entry.note || "")}</small></span>
+    </button>`).join("");
+}
+
+async function loadGlossaryEntries() {
+  if (glossaryList) glossaryList.innerHTML = `<div class="outline-empty">正在读取本地术语表…</div>`;
+  try {
+    const response = await fetch("/api/glossary");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    glossaryEntries = Array.isArray(data.entries) ? data.entries : [];
+    renderGlossaryEntries(glossarySearch ? glossarySearch.value : "");
+  } catch (error) {
+    if (glossaryList) glossaryList.innerHTML = `<div class="outline-empty">术语表读取失败：${esc(String(error))}</div>`;
+  }
+}
+
+function openGlossary() {
+  if (!glossaryDialog || !glossaryToggle) return;
+  glossaryDialog.hidden = false;
+  glossaryToggle.setAttribute("aria-expanded", "true");
+  loadGlossaryEntries();
+  if (glossarySearch && glossarySearch.focus) glossarySearch.focus();
+}
+
+function closeGlossary() {
+  if (!glossaryDialog || !glossaryToggle) return;
+  glossaryDialog.hidden = true;
+  glossaryToggle.setAttribute("aria-expanded", "false");
+}
+
+function editGlossaryEntry(word) {
+  const entry = glossaryEntries.find((item) => item.word === word);
+  if (!entry) return;
+  if (glossaryWord) glossaryWord.value = entry.word;
+  if (glossaryPos) glossaryPos.value = entry.pos || "";
+  if (glossaryZh) glossaryZh.value = entry.zh || "";
+  if (glossaryNote) glossaryNote.value = entry.note || "";
+  if (glossaryMessage) {
+    glossaryMessage.classList.remove("is-error");
+    glossaryMessage.textContent = entry.source === "custom" ? "正在编辑自定义词条。" : "保存后会在 glossary.json 中覆盖该内置释义。";
+  }
+}
+
+async function submitGlossaryEntry(event) {
+  if (event && event.preventDefault) event.preventDefault();
+  const payload = {
+    word: glossaryWord ? glossaryWord.value.trim() : "",
+    pos: glossaryPos ? glossaryPos.value.trim() : "",
+    zh: glossaryZh ? glossaryZh.value.trim() : "",
+    note: glossaryNote ? glossaryNote.value.trim() : "",
+  };
+  if (glossaryMessage) {
+    glossaryMessage.classList.remove("is-error");
+    glossaryMessage.textContent = "正在保存…";
+  }
+  try {
+    const response = await fetch("/api/glossary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    sentenceResults.clear();
+    await loadGlossaryEntries();
+    if (glossarySearch) glossarySearch.value = data.entry.word;
+    renderGlossaryEntries(data.entry.word);
+    if (glossaryMessage) glossaryMessage.textContent = `已保存“${data.entry.word}”，当前句的翻译与术语会重新解析。`;
+    if (selectedTarget && panelPosition !== "off") {
+      const requestId = ++requestSerial;
+      renderLoadingPanel(selectedTarget);
+      loadAndRender(selectedTarget, requestId, true);
+    }
+  } catch (error) {
+    if (glossaryMessage) {
+      glossaryMessage.classList.add("is-error");
+      glossaryMessage.textContent = `保存失败：${String(error)}`;
+    }
+  }
+}
+
+function offsetWithin(element, ancestor, axis = "top") {
+  let total = 0;
+  let current = element;
+  const key = axis === "left" ? "offsetLeft" : "offsetTop";
+  while (current && current !== ancestor) {
+    total += Number(current[key] || 0);
+    current = current.offsetParent;
+  }
+  return total;
+}
+
+async function navigatePdfDestination(pdf, destination) {
+  const resolved = await resolvePdfDestination(pdf, destination);
+  if (!resolved || !document.querySelector) return false;
+  const pageElement = document.querySelector(`.page-wrap[data-page-number="${resolved.pageNum}"]`);
+  if (!pageElement) return false;
+  const viewport = pageElement.__pdfViewport;
+  let localX = 0;
+  let localY = 0;
+  const numberAt = (index, fallback = null) => Number.isFinite(Number(resolved.args[index])) ? Number(resolved.args[index]) : fallback;
+  if (viewport) {
+    let pdfX = 0;
+    let pdfY = null;
+    if (resolved.kind === "XYZ") {
+      pdfX = numberAt(0, 0);
+      pdfY = numberAt(1, null);
+    } else if (["FitH", "FitBH"].includes(resolved.kind)) {
+      pdfY = numberAt(0, null);
+    } else if (resolved.kind === "FitR") {
+      pdfX = numberAt(0, 0);
+      pdfY = numberAt(3, null);
+    }
+    if (pdfY !== null) {
+      const point = viewport.convertToViewportPoint(pdfX, pdfY);
+      localX = Math.max(0, point[0]);
+      localY = Math.max(0, point[1]);
+    }
+  }
+  if (documentPane && typeof documentPane.scrollTo === "function") {
+    documentPane.scrollTo({
+      top: Math.max(0, offsetWithin(pageElement, documentPane, "top") + localY - 12),
+      left: Math.max(0, offsetWithin(pageElement, documentPane, "left") + localX - 12),
+      behavior: "smooth",
+    });
+  } else if (pageElement.scrollIntoView) {
+    pageElement.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  pageElement.classList.add("outline-target-page");
+  setTimeout(() => pageElement.classList.remove("outline-target-page"), 1100);
+  return true;
+}
+
 async function navigateOutlineItem(pdf, item, button) {
   if (!item) return;
   if (item.dest) {
-    const pageNum = await resolveOutlinePage(pdf, item.dest);
-    if (pageNum && scrollToPage(pageNum)) {
+    if (await navigatePdfDestination(pdf, item.dest)) {
       if (outlinePanel && outlinePanel.querySelectorAll) {
         for (const node of outlinePanel.querySelectorAll(".outline-item.is-active")) node.classList.remove("is-active");
       }
       if (button) button.classList.add("is-active");
-      setOutlineOpen(false);
       return;
     }
   }
+  if (item.action && handleNamedAction(item.action)) return;
   if (item.url && window.open) {
     try {
       const externalUrl = new URL(item.url, window.location && window.location.href);
@@ -615,6 +1349,7 @@ function clearSelection({ renderEmpty = true } = {}) {
 
 function selectSentence(target) {
   if (!target || !target.text) return;
+  if (isNarrowViewport() && ((outlinePanel && !outlinePanel.hidden) || (bookmarkPanel && !bookmarkPanel.hidden))) setNavigationPanel(null);
   if (selectedTarget && selectedTarget.key !== target.key) removeClassFromSpans(selectedTarget, "is-selected");
   clearPreview();
   selectedTarget = target;
@@ -727,7 +1462,7 @@ function depthText(depth) {
   return ({ concise: "简洁", standard: "标准", detailed: "详细" })[depth] || "标准";
 }
 
-function grammarRows(grammar, compact = false) {
+function grammarRows(grammar, compact = false, rich = false) {
   if (!grammar) return "";
   const rows = [
     ["主语", grammar.subject], ["谓语", grammar.predicate], ["宾语", grammar.object],
@@ -737,27 +1472,172 @@ function grammarRows(grammar, compact = false) {
     rows.push(["语态", grammar.voice === "passive" ? "被动" : "主动"]);
     if (grammar.negated) rows.push(["否定", "是（包含 not / never 等否定成分）"]);
   }
-  return rows.map(([label, value]) => `<span class="grammar-label">${esc(label)}</span><span class="grammar-value">${esc(value)}</span>`).join("");
+  if (rich) {
+    const requirement = ({
+      mandatory: "强制要求", prohibited: "禁止", recommended: "建议",
+      permitted: "允许 / 能力", unspecified: "未明确",
+    })[grammar.requirement_level] || grammar.requirement_level;
+    rows.push(
+      ["间接宾语", grammar.indirect_object],
+      ["助动词", Array.isArray(grammar.auxiliaries) ? grammar.auxiliaries.join(" ") : grammar.auxiliaries],
+      ["短语动词", Array.isArray(grammar.particles) ? grammar.particles.join(" ") : grammar.particles],
+      ["时态 / 体 / 语气", [grammar.tense, grammar.aspect, grammar.mood].filter(Boolean).join(" / ")],
+      ["规范强度", requirement],
+      ["修饰成分", Array.isArray(grammar.modifiers) ? grammar.modifiers.join("；") : grammar.modifiers],
+      ["介词短语", Array.isArray(grammar.prepositional_phrases) ? grammar.prepositional_phrases.join("；") : grammar.prepositional_phrases],
+      ["并列结构", Array.isArray(grammar.coordination) ? grammar.coordination.join("；") : grammar.coordination],
+      ["先行词 / 被修饰项", grammar.antecedent],
+      ["证据来源", Array.isArray(grammar.evidence_sources) ? grammar.evidence_sources.join(" + ") : grammar.evidence_sources],
+      ["来源一致性", grammar.agreement === "corroborated" ? "多源一致" : grammar.agreement === "conflict" ? "来源冲突" : "单源判断"],
+    );
+  }
+  return rows.filter((row) => row[1]).map(([label, value]) => `<span class="grammar-label">${esc(label)}</span><span class="grammar-value">${esc(value)}</span>`).join("");
 }
 
-function renderTreeNode(clause, childrenByParent, detailed = false) {
-  const children = (childrenByParent.get(clause.id) || []).slice().sort((a, b) => a.order - b.order);
+function clauseDetailsHtml(clause, detailed = false) {
   const warnings = detailed ? (clause.warnings || []).map((warning) => `<div class="node-warning">${esc(warning)}</div>`).join("") : "";
-  const grammar = grammarRows(clause.grammar);
-  const childHtml = children.length
-    ? `<ol class="tree-children">${children.map((child) => renderTreeNode(child, childrenByParent, detailed)).join("")}</ol>`
+  const grammar = grammarRows(clause.grammar, false, true);
+  return (grammar || warnings) ? `<div class="node-detail"><div class="grammar-grid">${grammar}</div>${warnings}</div>` : "";
+}
+
+function clauseMarkerHtml(clause) {
+  const marker = String(clause.marker || "").trim();
+  if (!marker) return "";
+  const text = String(clause.text || "").trim().replace(/^["'(]+/, "");
+  if (text.toLowerCase().startsWith(marker.toLowerCase())) return "";
+  return `<span class="clause-marker">${esc(marker)}</span>`;
+}
+
+function bracketRelationLabel(clause) {
+  const marker = String(clause.marker || "").toLowerCase();
+  const labels = {
+    main: "主句",
+    concession: "让步从句",
+    condition: "条件从句",
+    time: marker === "until" ? "截止从句" : "时间从句",
+    cause: "原因从句",
+    purpose: "目的从句",
+    result: "结果从句",
+    relative: "定语从句",
+    content: "内容从句",
+    complement: "补语从句",
+    ambiguous: "待确认从句",
+  };
+  return labels[clause.relation] || clause.label || "从句";
+}
+
+function bracketSemanticLabel(clause) {
+  if (clause.relation !== "main" || !clause.grammar) return "";
+  return ({
+    mandatory: "规范要求",
+    prohibited: "规范禁止",
+    recommended: "规范建议",
+    permitted: "许可 / 能力",
+  })[clause.grammar.requirement_level] || "";
+}
+
+function bracketClauseText(clause) {
+  const text = String(clause.text || "").trim();
+  const marker = String(clause.marker || "").trim();
+  if (!marker) return text;
+  const pattern = new RegExp(`^["'(]*${marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b[,:]?\\s*`, "i");
+  const stripped = text.replace(pattern, "").trim();
+  return stripped || text;
+}
+
+function clauseFocusMeta(clause, includeConfidence = false) {
+  const grammar = clause.grammar || {};
+  const relation = bracketRelationLabel(clause);
+  const parts = [
+    grammar.subject ? `主语 ${grammar.subject}` : "",
+    grammar.modality ? `情态 ${grammar.modality}` : "",
+    grammar.voice ? `语态 ${grammar.voice === "passive" ? "被动" : "主动"}` : "",
+    `关系：${relation}`,
+  ];
+  if (includeConfidence) parts.push(`可信度：${confidenceText(Number(clause.confidence || 0))}`);
+  return parts.filter(Boolean).join(" · ");
+}
+
+function renderBracketBranch(clause, childrenByParent, mainId, leadingIds) {
+  let children = (childrenByParent.get(clause.id) || []).slice().sort((a, b) => a.order - b.order);
+  if (clause.id === mainId) children = children.filter((child) => !leadingIds.has(child.id));
+  const marker = String(clause.marker || "").trim();
+  const semantic = bracketSemanticLabel(clause);
+  const labelParts = [bracketRelationLabel(clause), semantic, marker].filter(Boolean);
+  const nested = children.length
+    ? `<div class="bracket-nested-children">${children.map((child) => renderBracketBranch(child, childrenByParent, mainId, leadingIds)).join("")}</div>`
     : "";
+  return `<div class="bracket-group clause-interactive relation-${esc(clause.relation || "ambiguous")}" data-clause-id="${esc(clause.id)}">
+    <span class="bracket-inline-label">${labelParts.map(esc).join(" · ")}</span>
+    <span class="bracket-inline-text">${esc(bracketClauseText(clause))}</span>
+    ${nested}
+  </div>`;
+}
+
+function renderBracketStructure(clauses, main, childrenByParent, detailed = false) {
+  const mainChildren = (childrenByParent.get(main.id) || []).slice();
+  const leading = mainChildren.filter((clause) => clause.order < main.order).sort((a, b) => a.order - b.order);
+  const leadingIds = new Set(leading.map((clause) => clause.id));
+  const topLevel = [...leading, main].sort((a, b) => a.order - b.order);
+  return `<div class="bracket-structure">
+    <div class="bracket-groups">${topLevel.map((clause) => renderBracketBranch(clause, childrenByParent, main.id, leadingIds)).join("")}</div>
+    <div class="bracket-focus-card">
+      <span class="bracket-focus-label" id="clause-focus-label">${esc(bracketRelationLabel(main))}</span>
+      <strong id="clause-focus-text">${esc(main.text)}</strong>
+      <span class="bracket-focus-meta" id="clause-focus-meta">${esc(clauseFocusMeta(main, detailed))}</span>
+    </div>
+  </div>`;
+}
+
+function renderLinkedSource(text, clauses) {
+  const ranges = [];
+  for (const clause of clauses) {
+    for (const segment of clause.segments || [[clause.start, clause.end]]) {
+      const start = Math.max(0, Number(segment[0]));
+      const end = Math.min(text.length, Number(segment[1]));
+      if (Number.isFinite(start) && Number.isFinite(end) && start < end) ranges.push({ start, end, clause });
+    }
+  }
+  ranges.sort((a, b) => a.start - b.start || (a.end - a.start) - (b.end - b.start));
+  let cursor = 0;
+  let html = "";
+  for (const range of ranges) {
+    if (range.end <= cursor) continue;
+    const start = Math.max(cursor, range.start);
+    if (start > cursor) html += esc(text.slice(cursor, start));
+    html += `<span class="linked-source-segment clause-interactive relation-${esc(range.clause.relation || "ambiguous")}" data-clause-id="${esc(range.clause.id)}">${esc(text.slice(start, range.end))}</span>`;
+    cursor = range.end;
+  }
+  return html + esc(text.slice(cursor));
+}
+
+function renderLinkedTreeNode(clause, childrenByParent, detailed = false) {
+  const children = (childrenByParent.get(clause.id) || []).slice().sort((a, b) => a.order - b.order);
   const confidence = detailed ? `<span class="confidence-badge">${confidenceText(Number(clause.confidence || 0))}</span>` : "";
-  return `<li class="tree-item" data-clause-id="${esc(clause.id)}">
-    <details class="tree-node relation-${esc(clause.relation || "ambiguous")}"${detailed ? " open" : ""}>
+  const marker = clauseMarkerHtml(clause);
+  const grammar = clause.grammar || {};
+  const syntax = [grammar.subject, grammar.predicate, grammar.object].filter(Boolean).map(esc).join(" → ");
+  const childrenHtml = children.length ? `<ol class="linked-tree-children">${children.map((child) => renderLinkedTreeNode(child, childrenByParent, detailed)).join("")}</ol>` : "";
+  return `<li class="linked-tree-item">
+    <details class="linked-tree-node clause-interactive relation-${esc(clause.relation || "ambiguous")}" data-clause-id="${esc(clause.id)}"${detailed ? " open" : ""}>
       <summary>
-        <div class="tree-summary-row"><span class="relation-badge">${esc(clause.label || clause.relation)}</span>${confidence}</div>
-        <div class="node-text">${esc(clause.text)}</div>
+        <div class="linked-node-heading"><span class="relation-badge">${esc(clause.label || clause.relation)}</span>${marker}${confidence}</div>
+        <div class="linked-node-text">${esc(clause.text)}</div>
+        ${syntax ? `<div class="linked-node-syntax">${syntax}</div>` : ""}
       </summary>
-      ${(grammar || warnings) ? `<div class="node-detail"><div class="grammar-grid">${grammar}</div>${warnings}</div>` : ""}
+      ${clauseDetailsHtml(clause, detailed)}
     </details>
-    ${childHtml}
+    ${childrenHtml}
   </li>`;
+}
+
+function renderLinkedStructure(text, clauses, main, childrenByParent, detailed = false) {
+  const legend = clauses.slice().sort((a, b) => a.order - b.order).map((clause) => `<button class="linked-legend-item clause-interactive relation-${esc(clause.relation || "ambiguous")}" type="button" data-clause-id="${esc(clause.id)}"><span class="linked-legend-swatch" aria-hidden="true"></span>${esc(clause.label || clause.relation)}</button>`).join("");
+  return `<div class="linked-structure">
+    <div class="linked-legend" aria-label="分句关系图例">${legend}</div>
+    <div class="linked-source-map" aria-label="按逻辑分句标记的原文">${renderLinkedSource(text, clauses)}</div>
+    <ol class="linked-tree">${renderLinkedTreeNode(main, childrenByParent, detailed)}</ol>
+  </div>`;
 }
 
 function renderSourceText(text, segments = []) {
@@ -798,9 +1678,21 @@ function renderAnalysisPanel(target, result) {
     childrenByParent.get(clause.parent_id).push(clause);
   }
   const main = clausesById.get(result.main_clause_id) || result.clauses[0];
-  const treeHtml = concise ? "" : renderTreeNode(main, childrenByParent, detailed);
-  const translationHtml = detailed && result.translation && result.translation.text
-    ? `<section class="analysis-section"><h3 class="section-heading">推荐译文</h3><div class="translation-card"><p class="translation-text">${esc(result.translation.text)}</p></div></section>`
+  const structureView = VALID_STRUCTURE_VIEWS.has(uiSettings.structureView) ? uiSettings.structureView : DEFAULT_SETTINGS.structureView;
+  const structureHtml = concise ? "" : structureView === "linked"
+    ? renderLinkedStructure(result.text || target.text, result.clauses, main, childrenByParent, detailed)
+    : renderBracketStructure(result.clauses, main, childrenByParent, detailed);
+  const translationClauses = detailed && result.translation && Array.isArray(result.translation.clauses)
+    ? `<ol class="translation-clauses">${result.translation.clauses.map((item) => `<li><span>${esc(item.text)}</span></li>`).join("")}</ol>`
+    : "";
+  const translationWarnings = detailed && result.translation && Array.isArray(result.translation.warnings)
+    ? result.translation.warnings.map((warning) => `<div class="translation-warning">${esc(warning)}</div>`).join("")
+    : "";
+  const translationHtml = result.translation && result.translation.text
+    ? `<section class="analysis-section translation-section"><h3 class="section-heading">中文翻译</h3><div class="translation-card">
+        <div class="translation-meta">${esc(result.translation.label || result.translation.engine || "本地翻译")}</div>
+        <p class="translation-text">${esc(result.translation.text)}</p>${translationClauses}${translationWarnings}
+      </div></section>`
     : "";
   const skeleton = grammarRows(main.grammar, true);
   const skeletonExtra = main.grammar
@@ -816,7 +1708,8 @@ function renderAnalysisPanel(target, result) {
   const globalWarnings = [...(target.contextWarnings || []), ...parserWarnings]
     .map((warning) => `<div class="global-warning">${esc(warning)}</div>`).join("");
   const engineName = result.engine === "spacy" ? "spaCy 本地解析" : "规则降级解析";
-  const logicSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">逻辑结构</h3><ol class="logic-tree">${treeHtml}</ol></section>`;
+  const structureLabel = structureView === "linked" ? "原文联动树" : "嵌套原文";
+  const logicSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">逻辑结构 · ${structureLabel}</h3>${structureHtml}</section>`;
   const termsSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">复杂词 / 术语</h3>${termsHtml}</section>`;
   const conciseCore = concise ? `<section class="analysis-section concise-core"><h3 class="section-heading">核心命题</h3><div class="core-card">${esc(main.text)}</div></section>` : "";
 
@@ -831,13 +1724,37 @@ function renderAnalysisPanel(target, result) {
 
   const sourceElement = document.getElementById("panel-source-text");
   if (sourceElement && !concise) {
-    for (const item of analysisContent.querySelectorAll("[data-clause-id]")) {
+    const interactiveItems = Array.from(analysisContent.querySelectorAll(".clause-interactive[data-clause-id]"));
+    const focusLabel = document.getElementById("clause-focus-label");
+    const focusText = document.getElementById("clause-focus-text");
+    const focusMeta = document.getElementById("clause-focus-meta");
+    let pinnedClauseId = null;
+    const showClauseInSource = (clauseId) => {
+      const clause = clausesById.get(clauseId);
+      if (clause) sourceElement.innerHTML = renderSourceText(result.text || target.text, clause.segments || [[clause.start, clause.end]]);
+      else sourceElement.textContent = result.text || target.text;
+    };
+    const syncPinnedClause = (clauseId) => {
+      pinnedClauseId = pinnedClauseId === clauseId ? null : clauseId;
+      for (const candidate of interactiveItems) candidate.classList.toggle("is-linked-active", !!pinnedClauseId && candidate.dataset.clauseId === pinnedClauseId);
+      showClauseInSource(pinnedClauseId);
+    };
+    const showClauseDetail = (clause) => {
+      if (!focusLabel || !focusText || !focusMeta) return;
+      focusLabel.textContent = bracketRelationLabel(clause);
+      focusText.textContent = clause.text || "";
+      focusMeta.textContent = clauseFocusMeta(clause, detailed);
+    };
+    for (const item of interactiveItems) {
       const clause = clausesById.get(item.dataset.clauseId);
       if (!clause) continue;
-      item.addEventListener("mouseenter", () => {
-        sourceElement.innerHTML = renderSourceText(result.text || target.text, clause.segments || [[clause.start, clause.end]]);
+      item.addEventListener("mouseenter", () => showClauseInSource(clause.id));
+      item.addEventListener("mouseleave", () => showClauseInSource(pinnedClauseId));
+      item.addEventListener("click", (event) => {
+        if (event.stopPropagation) event.stopPropagation();
+        showClauseDetail(clause);
+        syncPinnedClause(clause.id);
       });
-      item.addEventListener("mouseleave", () => { sourceElement.textContent = result.text || target.text; });
     }
   }
 }
@@ -900,9 +1817,11 @@ function cssNumber(name, fallback) {
 
 function panelWidth() { return cssNumber("--panel-width", 440); }
 function panelHeight() { return cssNumber("--panel-height", 340); }
+function clampPanelWidth(width) { return Math.max(340, Math.min(620, Math.round(width))); }
+function clampPanelHeight(height) { return Math.max(220, Math.min(560, Math.round(height))); }
 
 function setPanelWidth(width, persist = false) {
-  const clamped = Math.max(340, Math.min(620, Math.round(width)));
+  const clamped = clampPanelWidth(width);
   document.documentElement.style.setProperty("--panel-width", `${clamped}px`);
   if (panelResizer && isHorizontalPanel()) {
     panelResizer.setAttribute("aria-valuemin", "340");
@@ -915,7 +1834,7 @@ function setPanelWidth(width, persist = false) {
 }
 
 function setPanelHeight(height, persist = false) {
-  const clamped = Math.max(220, Math.min(560, Math.round(height)));
+  const clamped = clampPanelHeight(height);
   document.documentElement.style.setProperty("--panel-height", `${clamped}px`);
   if (panelResizer && !isHorizontalPanel()) {
     panelResizer.setAttribute("aria-valuemin", "220");
@@ -942,31 +1861,86 @@ function isNarrowViewport() {
   return !!(window.matchMedia && window.matchMedia("(max-width: 760px)").matches);
 }
 
+function applyPanelOverlaySize(state) {
+  if (!state || !state.panel) return;
+  const horizontal = state.position === "left" || state.position === "right";
+  if (horizontal) {
+    const width = state.pendingWidth;
+    const left = state.position === "right" ? state.panelRect.right - width : state.panelRect.left;
+    state.panel.style.left = `${left}px`;
+    state.panel.style.top = `${state.panelRect.top}px`;
+    state.panel.style.width = `${width}px`;
+    state.panel.style.height = `${state.panelRect.height}px`;
+    state.resizer.style.left = `${state.position === "right" ? left - state.resizerRect.width : left + width}px`;
+    state.resizer.style.top = `${state.panelRect.top}px`;
+    state.resizer.style.width = `${state.resizerRect.width || 7}px`;
+    state.resizer.style.height = `${state.panelRect.height}px`;
+  } else {
+    const height = state.pendingHeight;
+    const top = state.position === "bottom" ? state.panelRect.bottom - height : state.panelRect.top;
+    state.panel.style.left = `${state.panelRect.left}px`;
+    state.panel.style.top = `${top}px`;
+    state.panel.style.width = `${state.panelRect.width}px`;
+    state.panel.style.height = `${height}px`;
+    state.resizer.style.left = `${state.panelRect.left}px`;
+    state.resizer.style.top = `${state.position === "bottom" ? top - state.resizerRect.height : top + height}px`;
+    state.resizer.style.width = `${state.panelRect.width}px`;
+    state.resizer.style.height = `${state.resizerRect.height || 7}px`;
+  }
+}
+
 function startResize(event) {
-  if (isNarrowViewport() || panelPosition === "off") return;
-  resizeStart = { x: event.clientX, y: event.clientY, width: panelWidth(), height: panelHeight(), position: panelPosition };
+  if (isNarrowViewport() || panelPosition === "off" || !analysisPanel) return;
+  const width = panelWidth();
+  const height = panelHeight();
+  resizeStart = {
+    x: Number(event.clientX) || 0,
+    y: Number(event.clientY) || 0,
+    width,
+    height,
+    pendingWidth: width,
+    pendingHeight: height,
+    position: panelPosition,
+    panel: analysisPanel,
+    panelRect: measuredRect(analysisPanel, width, height),
+    resizer: panelResizer,
+    resizerRect: measuredRect(panelResizer, 7, 7),
+  };
+  workspace.classList.add("is-live-resizing");
+  analysisPanel.classList.add("is-live-resizing");
+  panelResizer.classList.add("is-live-resizing");
+  applyPanelOverlaySize(resizeStart);
   panelResizer.classList.add("is-dragging");
   document.body.classList.add(isHorizontalPanel() ? "is-resizing-x" : "is-resizing-y");
+  if (event.preventDefault) event.preventDefault();
   if (panelResizer.setPointerCapture && event.pointerId !== undefined) panelResizer.setPointerCapture(event.pointerId);
 }
 
 function moveResize(event) {
   if (!resizeStart) return;
-  if (resizeStart.position === "right") setPanelWidth(resizeStart.width + resizeStart.x - event.clientX);
-  else if (resizeStart.position === "left") setPanelWidth(resizeStart.width + event.clientX - resizeStart.x);
-  else if (resizeStart.position === "bottom") setPanelHeight(resizeStart.height + resizeStart.y - event.clientY);
-  else if (resizeStart.position === "top") setPanelHeight(resizeStart.height + event.clientY - resizeStart.y);
+  if (resizeStart.position === "right" || resizeStart.position === "left") {
+    const direction = resizeStart.position === "right" ? -1 : 1;
+    resizeStart.pendingWidth = clampPanelWidth(resizeStart.width + direction * ((Number(event.clientX) || 0) - resizeStart.x));
+  } else {
+    const direction = resizeStart.position === "bottom" ? -1 : 1;
+    resizeStart.pendingHeight = clampPanelHeight(resizeStart.height + direction * ((Number(event.clientY) || 0) - resizeStart.y));
+  }
+  applyPanelOverlaySize(resizeStart);
+  if (event.preventDefault) event.preventDefault();
 }
 
 function endResize() {
   if (!resizeStart) return;
-  const horizontal = resizeStart.position === "left" || resizeStart.position === "right";
+  const state = resizeStart;
+  const horizontal = state.position === "left" || state.position === "right";
   resizeStart = null;
+  applyPanelOverlaySize(state);
+  if (horizontal) setPanelWidth(state.pendingWidth, true);
+  else setPanelHeight(state.pendingHeight, true);
   panelResizer.classList.remove("is-dragging");
   document.body.classList.remove("is-resizing-x");
   document.body.classList.remove("is-resizing-y");
-  if (horizontal) setPanelWidth(panelWidth(), true);
-  else setPanelHeight(panelHeight(), true);
+  finishLiveResize(state.panel, state.resizer);
 }
 
 function resizeByKeyboard(event) {
@@ -999,11 +1973,18 @@ if (panelResizer) {
   panelResizer.addEventListener("pointerdown", startResize);
   panelResizer.addEventListener("keydown", resizeByKeyboard);
 }
-window.addEventListener("pointermove", moveResize);
-window.addEventListener("pointerup", endResize);
+if (navResizer) {
+  navResizer.addEventListener("pointerdown", startNavResize);
+  navResizer.addEventListener("keydown", resizeNavByKeyboard);
+}
+window.addEventListener("pointermove", (event) => { moveResize(event); moveNavResize(event); });
+window.addEventListener("pointerup", () => { endResize(); endNavResize(); });
+window.addEventListener("pointercancel", () => { endResize(); endNavResize(); });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    if (outlinePanel && !outlinePanel.hidden) setOutlineOpen(false);
+    if (glossaryDialog && !glossaryDialog.hidden) closeGlossary();
+    else if ((outlinePanel && !outlinePanel.hidden) || (bookmarkPanel && !bookmarkPanel.hidden)) setNavigationPanel(null);
+    else if (recentDocsMenu && !recentDocsMenu.hidden) closeRecentDocuments();
     else if (settingsPopover && !settingsPopover.hidden) closeSettings();
     else if (selectedTarget || (!panelCollapsed && panelPosition !== "off")) closeAnalysisPanel();
   }
@@ -1011,8 +1992,17 @@ document.addEventListener("keydown", (event) => {
 
 if (settingsToggle) settingsToggle.addEventListener("click", (event) => { if (event.stopPropagation) event.stopPropagation(); toggleSettings(); });
 if (settingsClose) settingsClose.addEventListener("click", closeSettings);
-if (themeSelect) themeSelect.addEventListener("change", (event) => setTheme(event.target.value));
+if (themeCycle) themeCycle.addEventListener("click", cycleTheme);
+if (docMeta) docMeta.addEventListener("click", (event) => {
+  if (event.stopPropagation) event.stopPropagation();
+  toggleRecentDocuments();
+});
+if (recentDocsList) recentDocsList.addEventListener("click", (event) => {
+  const button = event.target && event.target.closest ? event.target.closest("[data-recent-key]") : null;
+  if (button) switchRecentDocument(button.dataset.recentKey);
+});
 if (depthSelect) depthSelect.addEventListener("change", (event) => setAnalysisDepth(event.target.value));
+if (structureSelect) structureSelect.addEventListener("change", (event) => setStructureView(event.target.value));
 if (positionSelect) positionSelect.addEventListener("change", (event) => setPanelPosition(event.target.value));
 if (settingsReset) settingsReset.addEventListener("click", resetSettings);
 if (outlineToggle) outlineToggle.addEventListener("click", (event) => {
@@ -1020,12 +2010,32 @@ if (outlineToggle) outlineToggle.addEventListener("click", (event) => {
   setOutlineOpen(!outlinePanel || outlinePanel.hidden);
 });
 if (outlineClose) outlineClose.addEventListener("click", () => setOutlineOpen(false));
+if (bookmarkToggle) bookmarkToggle.addEventListener("click", (event) => {
+  if (event.stopPropagation) event.stopPropagation();
+  setBookmarksOpen(!bookmarkPanel || bookmarkPanel.hidden);
+});
+if (bookmarkClose) bookmarkClose.addEventListener("click", () => setBookmarksOpen(false));
+if (bookmarkAdd) bookmarkAdd.addEventListener("click", addBookmark);
+if (bookmarkContent) bookmarkContent.addEventListener("click", (event) => {
+  const button = event.target && event.target.closest ? event.target.closest("[data-bookmark-action]") : null;
+  if (!button) return;
+  const id = button.dataset.bookmarkId;
+  if (button.dataset.bookmarkAction === "remove") removeBookmark(id);
+  else if (button.dataset.bookmarkAction === "jump") jumpToBookmark(documentBookmarks().find((bookmark) => bookmark.id === id));
+});
+if (glossaryToggle) glossaryToggle.addEventListener("click", openGlossary);
+if (glossaryClose) glossaryClose.addEventListener("click", closeGlossary);
+if (glossarySearch) glossarySearch.addEventListener("input", (event) => renderGlossaryEntries(event.target.value));
+if (glossaryList) glossaryList.addEventListener("click", (event) => {
+  const entry = event.target && event.target.closest ? event.target.closest("[data-glossary-word]") : null;
+  if (entry) editGlossaryEntry(entry.dataset.glossaryWord);
+});
+if (glossaryForm) glossaryForm.addEventListener("submit", submitGlossaryEntry);
+if (glossaryDialog) glossaryDialog.addEventListener("click", (event) => { if (event.target === glossaryDialog) closeGlossary(); });
 document.addEventListener("click", (event) => {
-  if (outlinePanel && !outlinePanel.hidden && outlineToggle
-      && !outlinePanel.contains(event.target) && !outlineToggle.contains(event.target)) setOutlineOpen(false);
-  if (!settingsPopover || settingsPopover.hidden || !settingsToggle) return;
-  if (settingsPopover.contains(event.target) || settingsToggle.contains(event.target)) return;
-  closeSettings();
+  if (recentDocsMenu && !recentDocsMenu.hidden && recentDocs && !recentDocs.contains(event.target)) closeRecentDocuments();
+  if (settingsPopover && !settingsPopover.hidden && settingsToggle
+      && !settingsPopover.contains(event.target) && !settingsToggle.contains(event.target)) closeSettings();
 });
 
 /* ---------------- 文件加载 ---------------- */
@@ -1033,6 +2043,9 @@ document.addEventListener("click", (event) => {
 async function openPdf(file) {
   if (!file) return;
   const loadId = ++documentLoadSerial;
+  rememberRecentDocument(file);
+  setDocumentLabel(file, "加载中");
+  closeRecentDocuments();
   if (activeLoadingTask && typeof activeLoadingTask.destroy === "function") {
     Promise.resolve(activeLoadingTask.destroy()).catch(() => {});
   }
@@ -1044,12 +2057,16 @@ async function openPdf(file) {
   pagesEl.innerHTML = "";
   placeholder.hidden = true;
   sentenceResults.clear();
+  pageSentenceTargets.clear();
+  currentDocumentKey = `${file.name}:${Number(file.size) || 0}`;
+  bookmarkLoadSerial++;
+  bookmarkCacheKey = null;
+  bookmarkCache = [];
   clearPreview();
   clearSelection();
   setPanelCollapsed(panelPosition === "off" || isNarrowViewport());
-  setOutlineOpen(false);
+  setNavigationPanel(null);
   setOutlineStatus("正在读取 PDF…");
-  docMeta.textContent = `${file.name} · 加载中`;
   try {
     const data = await file.arrayBuffer();
     if (loadId !== documentLoadSerial) return;
@@ -1066,11 +2083,11 @@ async function openPdf(file) {
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
       await renderPage(pdf, pageNum, pagesEl, documentSentenceState);
       if (loadId !== documentLoadSerial || pdf !== currentPdf) return;
-      docMeta.textContent = `${file.name} · ${pageNum}/${pdf.numPages} 页`;
+      setDocumentLabel(file, `正在加载 ${pageNum}/${pdf.numPages} 页`);
       if (pageNum < pdf.numPages) await yieldToBrowser();
     }
     finalizeDocumentSentences(documentSentenceState);
-    docMeta.textContent = `${file.name} · ${pdf.numPages} 页`;
+    setDocumentLabel(file);
     await loadPdfOutline(pdf, loadId);
   } catch (error) {
     if (loadId !== documentLoadSerial) return;
@@ -1078,7 +2095,7 @@ async function openPdf(file) {
     currentPdf = null;
     placeholder.hidden = false;
     placeholder.innerHTML = `<span class="placeholder-mark">!</span><h1>PDF 加载失败</h1><p>${esc(String(error))}</p>`;
-    docMeta.textContent = "加载失败";
+    setDocumentLabel(file, "加载失败");
   }
 }
 
@@ -1086,6 +2103,7 @@ function bindFileInput(input) {
   if (!input) return;
   input.addEventListener("change", (event) => {
     const file = event.target.files && event.target.files[0];
+    event.target.value = "";
     openPdf(file);
   });
 }
@@ -1095,6 +2113,7 @@ bindFileInput(emptyFileInput);
 setTheme(uiSettings.theme, false);
 syncSettingsControls();
 restorePanelSize();
+restoreOutlineWidth();
 setPanelPosition(uiSettings.panelPosition, false, false);
 setPanelCollapsed(panelPosition === "off" || isNarrowViewport());
 

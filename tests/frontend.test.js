@@ -47,6 +47,11 @@ class FakeElement {
   }
 
   emit(type, event = {}) {
+    if (this.pointerLayer) {
+      if (type === "mouseenter") return this.pointerLayer.emit("mousemove", { clientX: this.pointerX, clientY: this.pointerY, ...event });
+      if (type === "mouseleave") return this.pointerLayer.emit("mouseleave", event);
+      if (type === "click") return this.pointerLayer.emit("click", { clientX: this.pointerX, clientY: this.pointerY, ...event });
+    }
     for (const callback of this.listeners.get(type) || []) callback(event);
   }
 
@@ -102,8 +107,10 @@ function loadViewer(
   const ids = [
     "file", "file-empty", "pages", "placeholder", "workspace", "analysis-panel",
     "analysis-content", "panel-toggle", "panel-close", "panel-resizer", "doc-meta",
+    "recent-docs", "recent-docs-menu", "recent-docs-list", "theme-cycle", "theme-icon",
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, new FakeElement()]));
+  elements["recent-docs-menu"].hidden = true;
   const documentListeners = new Map();
   const documentElement = new FakeElement();
   const body = new FakeElement();
@@ -168,6 +175,9 @@ function wireSentence(context, pageNum, text) {
   const wrap = new FakeElement();
   const words = [{ text, x0: 0, y0: 10, x1: 100, y1: 20 }];
   context.wireTextLayer(layer, wrap, [words], words, pageNum);
+  span.pointerLayer = layer;
+  span.pointerX = 50;
+  span.pointerY = 15;
   return span;
 }
 
@@ -182,6 +192,54 @@ test("示例 PDF 仍切分为 9 句", async () => {
   const textContent = await page.getTextContent();
   const words = context.toWords(textContent.items, viewport, 1.4);
   assert.equal(context.buildSentences(words).length, 9);
+});
+
+test("DFI 第 62 页同一 TextItem 内的连续句子会正确拆分", async () => {
+  const { context } = loadViewer();
+  const pdfjs = await pdfjsPromise;
+  const data = new Uint8Array(fs.readFileSync("docs/DDR_PHY_Interface_Specification_v5_2.pdf"));
+  const pdf = await pdfjs.getDocument({ data, verbosity: 0 }).promise;
+  const page = await pdf.getPage(62);
+  const viewport = page.getViewport({ scale: 1.4 });
+  const textContent = await page.getTextContent();
+  const words = context.toWords(textContent.items, viewport, 1.4);
+  const texts = context.buildSentences(words).map(context.sentenceText);
+  const paragraph = texts.filter((text) => /dfi_init_(?:start|complete)|associated timing parameters/.test(text));
+
+  assert.ok(paragraph.includes("The signals used in the frequency change protocol are dfi_init_start and dfi_init_complete during normal operation."));
+  assert.ok(paragraph.includes("The behavior of the dfi_init_start signal depends on the dfi_init_complete signal."));
+  assert.ok(paragraph.includes("A frequency change request is triggered when the MC asserts dfi_init_start."));
+  assert.ok(paragraph.includes("The PHY indicates the acceptance of the frequency change by de-asserting dfi_init_complete."));
+  assert.ok(paragraph.includes("The associated timing parameters are tinit_start and tinit_complete."));
+});
+
+test("TextItem 与 textLayer span 按文本对齐，不被空项整体错位", () => {
+  const { context } = loadViewer();
+  const first = new FakeElement("First line");
+  const second = new FakeElement("Second line");
+  const aligned = context.alignTextDivs(
+    [{ str: "" }, { str: "First line" }, { str: "" }, { str: "Second line" }],
+    [first, second],
+  );
+  assert.equal(aligned[1], first);
+  assert.equal(aligned[3], second);
+});
+
+test("PDF Link 注解渲染为可点击的安全内部链接层", async () => {
+  const { context } = loadViewer();
+  const wrap = new FakeElement();
+  const page = {
+    getAnnotations: async () => [{ subtype: "Link", rect: [10, 20, 80, 40], dest: "intro", overlaidText: "Introduction" }],
+  };
+  const viewport = {
+    width: 200,
+    height: 300,
+    convertToViewportPoint: (x, y) => [x, 300 - y],
+  };
+  await context.renderAnnotationLayer(page, viewport, wrap, {});
+  assert.equal(wrap.children.length, 1);
+  assert.equal(wrap.children[0].children.length, 1);
+  assert.equal(wrap.children[0].children[0].getAttribute("aria-label"), "Introduction");
 });
 
 
@@ -233,7 +291,8 @@ test("快速连续打开 PDF 时旧加载不能覆盖新文档", async () => {
   pending[0].resolve(firstPdf);
   await firstLoad;
 
-  assert.match(elements["doc-meta"].textContent, /second\.pdf/);
+  assert.equal(elements["doc-meta"].textContent, "second.pdf");
+  assert.ok(elements["recent-docs-list"].innerHTML.indexOf("second.pdf") < elements["recent-docs-list"].innerHTML.indexOf("first.pdf"));
   assert.ok(destroyed.includes(firstPdf));
   assert.ok(destroyed.includes(pending[0].task));
 });
@@ -328,10 +387,14 @@ test("结构树展示逻辑关系且不拼接重复引导词", () => {
     warnings: [],
   });
   const html = elements["analysis-content"].innerHTML;
-  assert.match(html, /核心命题/);
-  assert.match(html, /让步背景/);
-  assert.match(html, /时间关系/);
+  assert.match(html, /主句/);
   assert.match(html, /is not sampled/);
+  assert.match(html, /让步从句 · Although/);
+  assert.match(html, /主句/);
+  assert.match(html, /截止从句 · until/);
+  assert.match(html, /bracket-group clause-interactive relation-concession/);
+  assert.match(html, /bracket-group clause-interactive relation-main[\s\S]*bracket-nested-children[\s\S]*relation-time/);
+  assert.match(html, /bracket-focus-card/);
   assert.doesNotMatch(html, /AlthoughAlthough|untiluntil/);
 });
 

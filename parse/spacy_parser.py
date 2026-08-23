@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -66,6 +67,14 @@ def _clause_roots(doc: Any, main_root: Any) -> list[Any]:
         token
         for token in doc
         if token.i != main_root.i and token.dep_.split(":", 1)[0] in _CLAUSE_DEPS
+        # en_core_web_sm 常把名词短语“signals, timing parameters”中的 timing
+        # 误标成 advcl；该模式没有从句含义，不能从上级分句中剥离。
+        and not (
+            token.dep_.split(":", 1)[0] == "advcl"
+            and token.lower_ == "timing"
+            and token.head.lemma_.lower() in {"define", "specify", "include"}
+            and any(child.lemma_.lower() == "parameter" for child in token.children)
+        )
     ]
 
 
@@ -212,6 +221,19 @@ def _subject(root: Any, main_root: Any) -> Any | None:
         and root.head.pos_ in {"NOUN", "PROPN"}
     ):
         return root.head
+    if (
+        root.dep_.split(":", 1)[0] in {"relcl", "acl"}
+        and root.head.pos_ in {"NOUN", "PROPN"}
+    ):
+        explicit = next(
+            (
+                child
+                for child in root.children
+                if child.dep_.split(":", 1)[0] in {"nsubj", "nsubjpass", "csubj"}
+            ),
+            None,
+        )
+        return explicit or root.head
     subject = next(
         (
             child
@@ -225,20 +247,23 @@ def _subject(root: Any, main_root: Any) -> Any | None:
     return None
 
 
-def _grammar(root: Any, main_root: Any) -> Grammar:
+def _grammar(root: Any, main_root: Any, owned_tokens: list[Any] | None = None) -> Grammar:
     from .clauser import Grammar
 
     subject_token = _subject(root, main_root)
-    predicate_tokens = [
+    auxiliary_tokens = [
         child
         for child in root.children
-        if child.dep_.split(":", 1)[0] in {"aux", "auxpass", "neg", "prt"}
-    ] + [root]
+        if child.dep_.split(":", 1)[0] in {"aux", "auxpass"}
+    ]
+    particle_tokens = [child for child in root.children if child.dep_.split(":", 1)[0] == "prt"]
+    predicate_tokens = auxiliary_tokens + [child for child in root.children if child.dep_.split(":", 1)[0] == "neg"] + particle_tokens + [root]
     predicate = " ".join(token.text for token in sorted(set(predicate_tokens), key=lambda item: item.i))
-    object_token = next(
-        (child for child in root.children if child.dep_.split(":", 1)[0] in {"obj", "dobj", "iobj"}),
+    direct_object_token = next(
+        (child for child in root.children if child.dep_.split(":", 1)[0] in {"obj", "dobj"}),
         None,
     )
+    indirect_object_token = next((child for child in root.children if child.dep_.split(":", 1)[0] == "iobj"), None)
     complement_token = next(
         (child for child in root.children if child.dep_.split(":", 1)[0] in {"attr", "acomp", "oprd"}),
         None,
@@ -256,18 +281,71 @@ def _grammar(root: Any, main_root: Any) -> Grammar:
     )
     modal_tokens = [
         child.text
-        for child in root.children
+        for child in auxiliary_tokens
         if child.dep_.split(":", 1)[0] == "aux" and child.lemma_.lower() in _MODALS
     ]
+    negated = any(child.dep_.split(":", 1)[0] == "neg" for child in root.children)
+    modal_lemmas = [child.lemma_.lower() for child in auxiliary_tokens if child.lemma_.lower() in _MODALS]
+    if any(modal in {"shall", "must"} for modal in modal_lemmas):
+        requirement_level = "prohibited" if negated else "mandatory"
+    elif "should" in modal_lemmas:
+        requirement_level = "recommended"
+    elif any(modal in {"may", "can", "could"} for modal in modal_lemmas):
+        requirement_level = "permitted"
+    else:
+        requirement_level = "unspecified"
+    morph = root.morph
+    tense = "/".join(morph.get("Tense"))
+    aspect = "/".join(morph.get("Aspect"))
+    mood = "/".join(morph.get("Mood"))
+    clause_tokens = list(owned_tokens) if owned_tokens is not None else list(root.subtree)
+    modifier_tokens = [
+        child
+        for child in clause_tokens
+        if child.dep_.split(":", 1)[0] in {"advmod", "npadvmod", "obl"}
+    ]
+    prepositions = [child for child in clause_tokens if child.dep_.split(":", 1)[0] == "prep"]
+    prepositional_phrases = [
+        " ".join(token.text for token in sorted(child.subtree, key=lambda item: item.i))
+        for child in prepositions
+    ]
+    coordination = [
+        " ".join(token.text for token in sorted(child.subtree, key=lambda item: item.i))
+        for child in root.children
+        if child.dep_.split(":", 1)[0] == "conj"
+    ]
+    antecedent = _phrase(root.head) if root.dep_.split(":", 1)[0] in {"relcl", "acl"} and root.head.pos_ in {"NOUN", "PROPN"} else ""
+    source_text = " ".join(token.text for token in sorted(clause_tokens, key=lambda item: item.i))
+    rule_modal = re.search(r"\b(shall|must|should|may|might|can|could|will|would)\b", source_text, re.I)
+    rule_negated = bool(re.search(r"\b(?:not|never|neither|nor)\b", source_text, re.I))
+    rule_passive = bool(re.search(r"\b(?:is|are|was|were|be|been|being)\s+(?:\w+ly\s+)?\w+(?:ed|en)\b", source_text, re.I))
+    checks = [rule_negated == negated, rule_passive == passive]
+    if rule_modal:
+        checks.append(rule_modal.group(1).lower() in modal_lemmas)
+    agreement = "corroborated" if all(checks) else "conflict"
     return Grammar(
         subject=_phrase(subject_token),
         predicate=predicate,
-        object=_phrase(object_token, include_prepositions=True),
+        object=_phrase(direct_object_token, include_prepositions=True),
         agent=_phrase(agent_token),
         complement=_phrase(complement_token, include_prepositions=True),
         voice="passive" if passive else "active",
-        negated=any(child.dep_.split(":", 1)[0] == "neg" for child in root.children),
+        negated=negated,
         modality=" ".join(modal_tokens),
+        direct_object=_phrase(direct_object_token, include_prepositions=True),
+        indirect_object=_phrase(indirect_object_token, include_prepositions=True),
+        auxiliaries=[token.text for token in sorted(auxiliary_tokens, key=lambda item: item.i)],
+        particles=[token.text for token in sorted(particle_tokens, key=lambda item: item.i)],
+        tense=tense,
+        aspect=aspect,
+        mood=mood,
+        requirement_level=requirement_level,
+        modifiers=[_phrase(token, include_prepositions=True) for token in modifier_tokens],
+        prepositional_phrases=prepositional_phrases,
+        coordination=coordination,
+        antecedent=antecedent,
+        evidence_sources=["spacy-dependency", "spacy-morphology", "technical-rule"],
+        agreement=agreement,
     )
 
 
@@ -347,7 +425,7 @@ def parse_spacy(text: str) -> ParsedSentence | None:
             if not (repaired_relative["start"] <= token.idx < repaired_relative["end"])
         ]
     main_segments = _segments(source, main_tokens)
-    main_grammar = _grammar(main_root, main_root)
+    main_grammar = _grammar(main_root, main_root, main_tokens)
     if repaired_relative and main_grammar.object.lower() == repaired_relative["marker"].lower():
         main_grammar.object = ""
     nodes = [
@@ -363,7 +441,8 @@ def parse_spacy(text: str) -> ParsedSentence | None:
             relation="main",
             label=_LABELS["main"],
             grammar=main_grammar,
-            confidence=0.96,
+            confidence=0.95 if main_grammar.agreement == "corroborated" else 0.72,
+            warnings=[] if main_grammar.agreement == "corroborated" else ["依存分析与技术规则对语态、否定或情态的判断存在差异。"],
         )
     ]
 
@@ -372,7 +451,8 @@ def parse_spacy(text: str) -> ParsedSentence | None:
         marker = _marker(root, source)
         relation, warnings = _relation(root, marker)
         parent_root = _nearest_clause_parent(root, roots, main_root)
-        own_segments = _segments(source, _own_tokens(doc, root, roots, main_root))
+        own_tokens = _own_tokens(doc, root, roots, main_root)
+        own_segments = _segments(source, own_tokens)
         nodes.append(
             ClauseNode(
                 id=root_ids[root.i],
@@ -386,9 +466,13 @@ def parse_spacy(text: str) -> ParsedSentence | None:
                 relation=relation,
                 label=_LABELS[relation],
                 marker=marker,
-                grammar=_grammar(root, main_root),
-                confidence=0.72 if relation == "ambiguous" else 0.93,
-                warnings=warnings,
+                grammar=(clause_grammar := _grammar(root, main_root, own_tokens)),
+                confidence=(
+                    0.68 if relation == "ambiguous"
+                    else 0.92 if clause_grammar.agreement == "corroborated"
+                    else 0.7
+                ),
+                warnings=warnings + ([] if clause_grammar.agreement == "corroborated" else ["依存分析与技术规则的语法判断存在差异。"]),
             )
         )
 

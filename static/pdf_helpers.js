@@ -26,28 +26,127 @@
     }));
   }
 
-  function targetAtPoint(targets, x, y) {
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-    return (targets || []).find((target) => (target.rects || []).some((rect) => (
-      x >= rect.left && x <= rect.left + rect.width
-      && y >= rect.top && y <= rect.top + rect.height
-    ))) || null;
+  function mergeNearbyRects(rects, rowTolerance = 3, gapTolerance = 4) {
+    const ordered = (rects || [])
+      .filter((rect) => rect && [rect.left, rect.top, rect.width, rect.height].every(Number.isFinite) && rect.width > 0 && rect.height > 0)
+      .map((rect) => ({ ...rect }))
+      .sort((a, b) => a.top - b.top || a.left - b.left);
+    const merged = [];
+    for (const rect of ordered) {
+      const previous = merged[merged.length - 1];
+      const sameRow = previous
+        && Math.abs(previous.top - rect.top) <= rowTolerance
+        && Math.abs((previous.top + previous.height) - (rect.top + rect.height)) <= rowTolerance;
+      const gap = previous ? rect.left - (previous.left + previous.width) : Number.POSITIVE_INFINITY;
+      if (sameRow && gap >= -1 && gap <= gapTolerance) {
+        const right = Math.max(previous.left + previous.width, rect.left + rect.width);
+        const bottom = Math.max(previous.top + previous.height, rect.top + rect.height);
+        previous.left = Math.min(previous.left, rect.left);
+        previous.top = Math.min(previous.top, rect.top);
+        previous.width = right - previous.left;
+        previous.height = bottom - previous.top;
+      } else {
+        merged.push(rect);
+      }
+    }
+    return merged;
   }
 
-  async function resolveOutlinePage(pdf, destination) {
+  function buildSentenceDomRects(sentence, textDivs, wrapRect, pageWidth, pageHeight, rangeFactory = null) {
+    if (!sentence || !sentence.length || !textDivs || !textDivs.length || !wrapRect) return [];
+    const rangesByItem = new Map();
+    for (const word of sentence) {
+      if (!Number.isInteger(word.itemIndex) || !Number.isInteger(word.charStart) || !Number.isInteger(word.charEnd)) continue;
+      const previous = rangesByItem.get(word.itemIndex);
+      if (previous) {
+        previous.start = Math.min(previous.start, word.charStart);
+        previous.end = Math.max(previous.end, word.charEnd);
+      } else {
+        rangesByItem.set(word.itemIndex, { start: word.charStart, end: word.charEnd });
+      }
+    }
+    const createRange = rangeFactory || (global.document && typeof global.document.createRange === "function"
+      ? () => global.document.createRange()
+      : null);
+    if (!createRange) return [];
+
+    const rects = [];
+    for (const [itemIndex, offsets] of rangesByItem) {
+      const span = textDivs[itemIndex];
+      const node = span && span.firstChild;
+      if (!node || typeof node.textContent !== "string") continue;
+      const length = node.textContent.length;
+      const start = Math.max(0, Math.min(length, offsets.start));
+      const end = Math.max(start, Math.min(length, offsets.end));
+      if (start === end) continue;
+      let range;
+      try {
+        range = createRange();
+        range.setStart(node, start);
+        range.setEnd(node, end);
+        for (const clientRect of range.getClientRects()) {
+          const left = Math.max(0, clientRect.left - wrapRect.left);
+          const top = Math.max(0, clientRect.top - wrapRect.top);
+          const right = Math.min(pageWidth, clientRect.right - wrapRect.left);
+          const bottom = Math.min(pageHeight, clientRect.bottom - wrapRect.top);
+          if (right > left && bottom > top) rects.push({ left, top, width: right - left, height: bottom - top });
+        }
+      } catch (_ignored) {
+        // 某些损坏 PDF 会让文本节点与 TextItem 的字符数不一致，交给坐标回退。
+      } finally {
+        if (range && typeof range.detach === "function") range.detach();
+      }
+    }
+    return mergeNearbyRects(rects);
+  }
+
+  function targetAtPoint(targets, x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const matches = [];
+    for (const target of targets || []) {
+      for (const rect of target.rects || []) {
+        if (x < rect.left || x > rect.left + rect.width || y < rect.top || y > rect.top + rect.height) continue;
+        const area = rect.width * rect.height;
+        const centerDistance = Math.abs(x - (rect.left + rect.width / 2)) + Math.abs(y - (rect.top + rect.height / 2));
+        matches.push({ target, area, centerDistance });
+      }
+    }
+    matches.sort((a, b) => a.area - b.area || a.centerDistance - b.centerDistance);
+    return matches.length ? matches[0].target : null;
+  }
+
+  async function resolvePdfDestination(pdf, destination) {
     if (!pdf || !destination) return null;
     let explicit = destination;
     if (typeof explicit === "string") explicit = await pdf.getDestination(explicit);
     if (!Array.isArray(explicit) || !explicit.length) return null;
     const pageRef = explicit[0];
-    if (Number.isInteger(pageRef)) return pageRef + 1;
-    try {
-      const pageIndex = await pdf.getPageIndex(pageRef);
-      return Number.isInteger(pageIndex) ? pageIndex + 1 : null;
-    } catch (_ignored) {
-      return null;
+    let pageIndex = null;
+    if (Number.isInteger(pageRef)) pageIndex = pageRef;
+    else {
+      try {
+        pageIndex = await pdf.getPageIndex(pageRef);
+      } catch (_ignored) {
+        return null;
+      }
     }
+    if (!Number.isInteger(pageIndex) || pageIndex < 0) return null;
+    const kindValue = explicit[1];
+    const kind = typeof kindValue === "string" ? kindValue : String(kindValue && kindValue.name || "Fit");
+    return { pageNum: pageIndex + 1, kind, args: explicit.slice(2), explicit };
   }
 
-  global.__parseSpecPdfHelpers = { buildSentenceLineRects, resolveOutlinePage, targetAtPoint };
+  async function resolveOutlinePage(pdf, destination) {
+    const resolved = await resolvePdfDestination(pdf, destination);
+    return resolved ? resolved.pageNum : null;
+  }
+
+  global.__parseSpecPdfHelpers = {
+    buildSentenceDomRects,
+    buildSentenceLineRects,
+    mergeNearbyRects,
+    resolveOutlinePage,
+    resolvePdfDestination,
+    targetAtPoint,
+  };
 }(globalThis));
