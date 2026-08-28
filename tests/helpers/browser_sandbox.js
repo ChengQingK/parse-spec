@@ -13,6 +13,7 @@ function ensureBrowserScriptsLoaded() {
   require("../../static/pdf_helpers.js");
   require("../../static/viewer_sentences.js");
   require("../../static/viewer_marks.js");
+  require("../../static/viewer_pages.js");
   require("../../static/viewer.js");
   loaded = true;
 }

@@ -29,6 +29,7 @@ function createViewer() {
     alignTextDivs,
     buildSentences,
     clearSentenceMarks,
+    createPageVirtualizer,
     createSentenceMarks,
     finalizeDocumentSentences,
     hasTerminalPunctuation,
@@ -43,13 +44,7 @@ function createViewer() {
     wordAtTextOffset,
   } = parts;
 
-  const PAGE_GAP_PX = 20;              // 与 style.css #pages 的 gap 保持一致
-const MOUNTED_PAGE_LIMIT = 8;        // 页面虚拟化：最多同时挂载的页数
-const MOUNT_SETTLE_MS = 120;         // 进入视距后的挂载沉降，过滤快速掠过
-const MAX_CONCURRENT_RENDERS = 2;    // canvas 光栅化并发闸门
-const CANVAS_MAX_SCALE = 3.2;
-const CANVAS_MAX_PIXELS = 16_000_000;
-const SEARCH_DEBOUNCE_MS = 150;
+  const SEARCH_DEBOUNCE_MS = 150;
 const fileInput = document.getElementById("file");
 const emptyFileInput = document.getElementById("file-empty");
 const pagesEl = document.getElementById("pages");
@@ -128,6 +123,30 @@ const THEME_LABELS = Object.freeze({ light: "浅色", dark: "暗色", eye: "护�
 const THEME_ICONS = Object.freeze({ light: "☀", dark: "☾", eye: "◐" });
 const sentenceResults = new Map();
 const pageSentenceTargets = new Map();
+
+/* 页面虚拟化与挂载管线：可变状态内聚在工厂内，viewer 侧依赖显式注入。 */
+const pages = createPageVirtualizer({
+  sentences: { S, toWords, buildSentences, alignTextDivs },
+  helpers: { fitCanvasScale, buildSentenceDomRects },
+  marks: { addClassToSpans, createSentenceMarks, toggleSentenceMarks, purgePageMarks },
+  utils: { measuredRect },
+  refs: {
+    pdfjsLib,
+    getLoadSerial: () => documentLoadSerial,
+    getCurrentPdf: () => currentPdf,
+    getPdfZoom: () => pdfZoom,
+    getDocumentPane: () => documentPane,
+    getSelectedTarget: () => selectedTarget,
+    getPreviewTarget: () => previewTarget,
+    pageSentenceTargets,
+  },
+  hooks: {
+    createPageTargets,
+    wireTextLayer,
+    renderAnnotationLayer,
+    getCurrentVisiblePage: () => currentVisiblePage(),
+  },
+});
 const renderComplexWordEntriesDebounced = debounce((value) => renderComplexWordEntries(value), SEARCH_DEBOUNCE_MS);
 const renderGlossaryEntriesDebounced = debounce((value) => renderGlossaryEntries(value), SEARCH_DEBOUNCE_MS);
 
@@ -172,16 +191,6 @@ let zoomCommitTimer = 0;
 let pageStatusFrame = 0;
 let uiSettings = loadSettings();
 
-/* 页面虚拟化状态：解析阶段只建占位与句子数据，视觉渲染按需挂载/回收。 */
-let pageTops = [];
-let pageHeights = [];
-const pageDataByNum = new Map();
-const mountedPages = new Map();
-const visibleSlots = new Set();
-const mountTimers = new Map();
-let pageObserver = null;
-let activeRenders = 0;
-const renderQueue = [];
 
 /* ---------------- 界面状态 ---------------- */
 
@@ -261,7 +270,7 @@ function commitPdfZoom(persist = true) {
   if (persist) {
     try { if (window.localStorage) window.localStorage.setItem(PDF_ZOOM_KEY, String(pdfZoom)); } catch (_ignored) {}
   }
-  if (currentPdf) rerenderMountedCanvases();
+  if (currentPdf) pages.rerenderMountedCanvases();
   schedulePageStatusUpdate();
 }
 
@@ -389,280 +398,6 @@ function setStructureView(view, persist = true) {
   refreshSelectedAnalysis(false);
 }
 
-/* ---------------- PDF 页面 ---------------- */
-
-function devicePixelRatioSafe() {
-  return Math.max(1, Math.min(3, Number(window.devicePixelRatio) || 1));
-}
-
-function renderScaleFor(viewport) {
-  return fitCanvasScale(
-    viewport.width / S,
-    viewport.height / S,
-    S * devicePixelRatioSafe() * pdfZoom,
-    { maxScale: CANVAS_MAX_SCALE, maxPixels: CANVAS_MAX_PIXELS },
-  );
-}
-
-function acquireRenderSlot() {
-  if (activeRenders < MAX_CONCURRENT_RENDERS) {
-    activeRenders += 1;
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => renderQueue.push(resolve));
-}
-
-function releaseRenderSlot() {
-  activeRenders = Math.max(0, activeRenders - 1);
-  const next = renderQueue.shift();
-  if (next) {
-    activeRenders += 1;
-    next();
-  }
-}
-
-/* 解析阶段：只取文本与建句子数据，创建定尺寸占位，不做任何视觉渲染。 */
-async function parsePage(pdf, pageNum, container, documentSentenceState, loadId) {
-  const page = await pdf.getPage(pageNum);
-  const viewport = page.getViewport({ scale: S });
-  const wrap = document.createElement("div");
-  wrap.className = "page-wrap";
-  wrap.dataset.pageNumber = String(pageNum);
-  wrap.__pdfViewport = viewport;
-  wrap.style.setProperty("--scale-factor", String(Number(viewport.scale || S)));
-  wrap.style.width = `${Math.floor(viewport.width)}px`;
-  wrap.style.height = `${Math.floor(viewport.height)}px`;
-  container.appendChild(wrap);
-  const textContent = await page.getTextContent();
-  if (loadId !== documentLoadSerial || pdf !== currentPdf) return null;
-  const words = toWords(textContent.items, viewport, S);
-  const sentences = buildSentences(words);
-  const sentenceTargets = createPageTargets(sentences, pageNum, documentSentenceState);
-  sentenceTargets.forEach((target, sentenceIndex) => {
-    pageSentenceTargets.set(`${pageNum}:${sentenceIndex}`, target);
-  });
-  pageDataByNum.set(pageNum, { page, viewport, textContent, words, sentences, targets: sentenceTargets, wrap });
-  pageHeights[pageNum - 1] = Math.floor(viewport.height);  // 与占位取整一致，避免页码坐标漂移
-  pageTops[pageNum - 1] = pageNum > 1
-    ? (pageTops[pageNum - 2] || 0) + (pageHeights[pageNum - 2] || 0) + PAGE_GAP_PX
-    : 0;
-  if (pageObserver) pageObserver.observe(wrap);
-  else await mountPageVisual(pageNum, loadId);  // 无 IntersectionObserver 的环境回退为全量渲染
-  return wrap;
-}
-
-function sizeCanvasToViewport(canvas, viewport) {
-  const scale = renderScaleFor(viewport);
-  canvas.width = Math.max(1, Math.floor((viewport.width / S) * scale));
-  canvas.height = Math.max(1, Math.floor((viewport.height / S) * scale));
-  canvas.style.width = `${Math.floor(viewport.width)}px`;
-  canvas.style.height = `${Math.floor(viewport.height)}px`;
-  return scale;
-}
-
-/* 单个挂载页的位图渲染：先取消在途渲染并等其落定，杜绝同 canvas 并发 render；
-   拿到渲染槽后复查状态，任何路径都保证释放槽位。 */
-async function renderMountCanvas(mount) {
-  const serial = ++mount.renderSerial;
-  const data = pageDataByNum.get(mount.pageNum);
-  if (!data || !mount.canvas) return;
-  if (mount.renderTask && typeof mount.renderTask.cancel === "function") {
-    try { mount.renderTask.cancel(); } catch (_ignored) {}
-    try { await mount.renderTask.promise; } catch (_ignored) {}
-  }
-  if (serial !== mount.renderSerial || mount.stage === "unmounted" || mount.loadId !== documentLoadSerial) return;
-  const scale = sizeCanvasToViewport(mount.canvas, data.viewport);
-  await acquireRenderSlot();
-  try {
-    if (serial !== mount.renderSerial || mount.stage === "unmounted" || mount.loadId !== documentLoadSerial) return;
-    mount.renderTask = data.page.render({ canvasContext: mount.canvas.getContext("2d"), viewport: data.page.getViewport({ scale }) });
-    await mount.renderTask.promise;
-  } catch (error) {
-    if (mount.stage !== "unmounted" && mount.loadId === documentLoadSerial && String(error && error.name) !== "RenderingCancelledException") {
-      console.warn(`第 ${mount.pageNum} 页位图渲染失败`, error);
-    }
-  } finally {
-    releaseRenderSlot();
-  }
-}
-
-/* 渲染阶段：挂载 canvas/textLayer/注解层并接线交互，可取消、受挂载上限约束。 */
-async function mountPageVisual(pageNum, loadId = documentLoadSerial) {
-  if (mountedPages.has(pageNum)) return mountedPages.get(pageNum).ready;
-  const data = pageDataByNum.get(pageNum);
-  if (!data || loadId !== documentLoadSerial || !currentPdf) return null;
-  const mount = {
-    pageNum,
-    loadId,
-    stage: "mounting",
-    zoomAtMount: pdfZoom,
-    canvas: null,
-    renderTask: null,
-    renderSerial: 0,
-    targets: null,
-    alignedTextDivs: [],
-    ready: null,
-  };
-  mountedPages.set(pageNum, mount);
-  mount.ready = (async () => {
-    try {
-      const { page, viewport, textContent, words, sentences, targets, wrap } = data;
-      const canvas = document.createElement("canvas");
-      wrap.appendChild(canvas);
-      mount.canvas = canvas;
-      await renderMountCanvas(mount);
-      if (loadId !== documentLoadSerial || mount.stage === "unmounted") return;
-
-      const textLayer = document.createElement("div");
-      textLayer.className = "textLayer";
-      textLayer.style.width = `${Math.floor(viewport.width)}px`;
-      textLayer.style.height = `${Math.floor(viewport.height)}px`;
-      wrap.appendChild(textLayer);
-      let textDivs = [];
-      if (typeof pdfjsLib.TextLayer === "function") {
-        const textLayerTask = new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport });
-        await textLayerTask.render();
-        textDivs = textLayerTask.textDivs || [];
-      } else {
-        textDivs = [];
-        await pdfjsLib.renderTextLayer({ textContent, container: textLayer, viewport, textDivs }).promise;
-      }
-      textLayer.style.visibility = "visible";
-      if (loadId !== documentLoadSerial || mount.stage === "unmounted") return;
-      mount.alignedTextDivs = alignTextDivs(textContent.items, textDivs);
-      mount.targets = wireTextLayer(textLayer, wrap, sentences, words, pageNum, mount.alignedTextDivs, targets, viewport.width, viewport.height);
-      await renderAnnotationLayer(page, viewport, wrap, currentPdf);
-      if (typeof page.cleanup === "function") page.cleanup();
-      mount.stage = "mounted";
-      // 重新挂载的页需要恢复选中/预览高亮
-      if (selectedTarget && (selectedTarget.locations || []).some((location) => location.pageNum === pageNum)) {
-        addClassToSpans(selectedTarget, "is-selected");
-      }
-      if (previewTarget && (previewTarget.locations || []).some((location) => location.pageNum === pageNum)) {
-        addClassToSpans(previewTarget, "is-preview");
-      }
-      // 挂载期间发生过缩放提交：位图按新倍率补渲一次
-      if (mount.zoomAtMount !== pdfZoom) await renderMountCanvas(mount);
-      scheduleExactRectsWarmup(mount);
-      enforceMountedPageLimit();
-    } catch (error) {
-      // 失败页移出挂载表，允许再次进入视距时重试
-      if (mount.stage !== "unmounted") mountedPages.delete(pageNum);
-      if (mount.stage !== "unmounted" && loadId === documentLoadSerial) {
-        console.warn(`第 ${pageNum} 页渲染失败`, error);
-      }
-    }
-  })();
-  return mount.ready;
-}
-
-function unmountPage(pageNum) {
-  const mount = mountedPages.get(pageNum);
-  if (!mount) return;
-  mount.stage = "unmounted";
-  mountedPages.delete(pageNum);
-  if (mount.renderTask && typeof mount.renderTask.cancel === "function") {
-    try { mount.renderTask.cancel(); } catch (_ignored) {}
-  }
-  const data = pageDataByNum.get(pageNum);
-  if (data && data.wrap) data.wrap.innerHTML = "";  // 占位尺寸由 inline style 保留，无需重设
-  purgePageMarks(pageNum);  // 丢弃该页的 mark 引用，重新挂载时由 createSentenceMarks 重建
-  // 丢弃已脱离 DOM 的 span 引用，重新挂载时由 wireTextLayer 重建
-  for (const target of (data && data.targets) || []) {
-    target.spans = (target.spans || []).filter((span) => span && span.isConnected !== false);
-  }
-}
-
-function ensurePageObserver() {
-  if (pageObserver || typeof IntersectionObserver !== "function") return pageObserver;
-  pageObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      const pageNum = Number(entry.target.dataset && entry.target.dataset.pageNumber) || 0;
-      if (!pageNum) continue;
-      if (entry.isIntersecting) {
-        visibleSlots.add(pageNum);
-        scheduleMount(pageNum);
-      } else {
-        visibleSlots.delete(pageNum);
-        enforceMountedPageLimit();
-      }
-    }
-  }, { root: documentPane || null, rootMargin: "1600px 0px", threshold: 0 });
-  return pageObserver;
-}
-
-function scheduleMount(pageNum) {
-  if (mountedPages.has(pageNum) || mountTimers.has(pageNum)) return;
-  const timer = setTimeout(() => {
-    mountTimers.delete(pageNum);
-    if (visibleSlots.has(pageNum)) mountPageVisual(pageNum);
-  }, MOUNT_SETTLE_MS);
-  mountTimers.set(pageNum, timer);
-}
-
-function enforceMountedPageLimit() {
-  if (!pageObserver) return;  // 无 IO 的回退路径必须保留全部已挂载页
-  if (mountedPages.size <= MOUNTED_PAGE_LIMIT) return;
-  const current = currentVisiblePage();
-  // mountedPages 保持插入序；稳定排序下平局即挂载先后
-  const candidates = [...mountedPages.values()]
-    .filter((mount) => !visibleSlots.has(mount.pageNum))
-    .sort((a, b) => Math.abs(b.pageNum - current) - Math.abs(a.pageNum - current));
-  for (const mount of candidates) {
-    if (mountedPages.size <= MOUNTED_PAGE_LIMIT) break;
-    unmountPage(mount.pageNum);
-  }
-}
-
-/* 高亮 rect 懒计算：挂载时先用行级回退矩形，空闲时再升级为字符级精确矩形。 */
-function computeExactRectsForMount(mount) {
-  const data = pageDataByNum.get(mount.pageNum);
-  if (!data || !mount.targets || !mount.alignedTextDivs.length) return false;
-  const wrapRect = measuredRect(data.wrap, data.viewport.width, data.viewport.height);
-  const width = data.viewport.width;
-  const height = data.viewport.height;
-  const visualScale = wrapRect.width > 0 ? wrapRect.width / width : pdfZoom;
-  let upgraded = false;
-  mount.targets.forEach((target, sentenceIndex) => {
-    const exact = buildSentenceDomRects(data.sentences[sentenceIndex], mount.alignedTextDivs, wrapRect, width, height, null, visualScale);
-    if (exact.length) {
-      target.rects = exact;
-      upgraded = true;
-    }
-  });
-  return upgraded;
-}
-
-function restoreHighlightsOnPage(pageNum) {
-  if (selectedTarget && (selectedTarget.locations || []).some((location) => location.pageNum === pageNum)) {
-    toggleSentenceMarks(selectedTarget, "is-selected", true);
-  }
-  if (previewTarget && (previewTarget.locations || []).some((location) => location.pageNum === pageNum)) {
-    toggleSentenceMarks(previewTarget, "is-preview", true);
-  }
-}
-
-function scheduleExactRectsWarmup(mount) {
-  const idle = (window && typeof window.requestIdleCallback === "function")
-    ? (callback) => window.requestIdleCallback(callback, { timeout: 800 })
-    : (callback) => setTimeout(callback, 60);
-  idle(() => {
-    if (mount.stage !== "mounted" || mount.loadId !== documentLoadSerial) return;
-    const data = pageDataByNum.get(mount.pageNum);
-    if (data && computeExactRectsForMount(mount)) {
-      createSentenceMarks(data.wrap, mount.targets);
-      restoreHighlightsOnPage(mount.pageNum);  // mark 层整体重建后恢复选中/预览高亮
-    }
-  });
-}
-
-/* 缩放提交后按新倍率重渲已挂载页的 canvas 位图（textLayer/mark 层由 CSS zoom 缩放，无需重建）。 */
-function rerenderMountedCanvases() {
-  for (const mount of mountedPages.values()) {
-    if (mount.stage === "mounted") void renderMountCanvas(mount);
-  }
-}
-
 function safeExternalUrl(value) {
   if (!value) return null;
   try {
@@ -686,7 +421,7 @@ function annotationRect(viewport, rect) {
 }
 
 function handleNamedAction(action) {
-  if (!currentPdf || !action || !pageTops.length) return false;
+  if (!currentPdf || !action || !pages.getPageTops().length) return false;
   const currentIndex = currentVisiblePage() - 1;
   const named = String(action);
   const target = named === "FirstPage" ? 1
@@ -1223,9 +958,10 @@ async function saveDocumentBookmarks(bookmarks) {
 }
 
 function currentVisiblePage() {
-  if (!pageTops.length) return 1;
+  const tops = pages.getPageTops();
+  if (!tops.length) return 1;
   const scrollTop = documentPane ? (Number(documentPane.scrollTop) || 0) / (committedPdfZoom || 1) : 0;
-  return pageIndexAtScroll(pageTops, pageHeights, scrollTop) + 1;
+  return pageIndexAtScroll(tops, pages.getPageHeights(), scrollTop) + 1;
 }
 
 function renderBookmarks() {
@@ -2680,19 +2416,9 @@ async function openPdf(file) {
   placeholder.hidden = true;
   sentenceResults.clear();
   pageSentenceTargets.clear();
-  // 重置页面虚拟化状态
-  if (pageObserver) {
-    pageObserver.disconnect();
-    pageObserver = null;
-  }
-  for (const timer of mountTimers.values()) clearTimeout(timer);
-  mountTimers.clear();
-  mountedPages.clear();
-  visibleSlots.clear();
-  pageDataByNum.clear();
+  // 重置页面虚拟化状态与 mark 引用缓存
+  pages.resetVirtualization();
   clearSentenceMarks();
-  pageTops = [];
-  pageHeights = [];
   currentDocumentKey = `${file.name}:${Number(file.size) || 0}`;
   bookmarkLoadSerial++;
   bookmarkCacheKey = null;
@@ -2715,10 +2441,10 @@ async function openPdf(file) {
     activeLoadingTask = null;
     currentPdf = pdf;
     updatePageStatus();
-    ensurePageObserver();
+    pages.ensurePageObserver();
     const documentSentenceState = { nextId: 0, pending: null };
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-      await parsePage(pdf, pageNum, pagesEl, documentSentenceState, loadId);
+      await pages.parsePage(pdf, pageNum, pagesEl, documentSentenceState, loadId);
       if (loadId !== documentLoadSerial || pdf !== currentPdf) return;
       setDocumentLabel(file, `正在加载 ${pageNum}/${pdf.numPages} 页`);
       updatePageStatus();
@@ -2756,23 +2482,20 @@ restorePanelWidth();
 restoreOutlineWidth();
 restorePdfZoom();
 
-/* 测试钩子：暴露虚拟化内部状态只读访问，供回归测试验证挂载/回收语义。生产环境不依赖。 */
+/* 测试钩子：虚拟化内部状态经 pages.testApi 委托，保持 getter 实时性。生产环境不依赖。 */
 const testHooks = {
-  get mountedPageCount() { return mountedPages.size; },
-  get mountedPageNums() { return [...mountedPages.keys()]; },
-  get hasPageObserver() { return Boolean(pageObserver); },
-  get visibleSlotCount() { return visibleSlots.size; },
-  get activeRenderCount() { return activeRenders; },
-  get renderQueueLength() { return renderQueue.length; },
-  get pageCount() { return pageDataByNum.size; },
-  setPageObserver(value) { pageObserver = value; },
-  setVisibleSlots(nums) { visibleSlots.clear(); nums.forEach((n) => visibleSlots.add(n)); },
-  setMountedPages(nums) {
-    mountedPages.clear();
-    nums.forEach((n) => mountedPages.set(n, { pageNum: n, stage: "mounted", loadId: documentLoadSerial }));
-  },
-  enforceMountedPageLimit,
-  unmountPage,
+  get mountedPageCount() { return pages.testApi.mountedPageCount; },
+  get mountedPageNums() { return pages.testApi.mountedPageNums; },
+  get hasPageObserver() { return pages.testApi.hasPageObserver; },
+  get visibleSlotCount() { return pages.testApi.visibleSlotCount; },
+  get activeRenderCount() { return pages.testApi.activeRenderCount; },
+  get renderQueueLength() { return pages.testApi.renderQueueLength; },
+  get pageCount() { return pages.testApi.pageCount; },
+  setPageObserver: (value) => pages.testApi.setPageObserver(value),
+  setVisibleSlots: (nums) => pages.testApi.setVisibleSlots(nums),
+  setMountedPages: (nums) => pages.testApi.setMountedPages(nums),
+  enforceMountedPageLimit: () => pages.testApi.enforceMountedPageLimit(),
+  unmountPage: (pageNum) => pages.testApi.unmountPage(pageNum),
   currentVisiblePage,
 };
 setPanelCollapsed(isNarrowViewport());

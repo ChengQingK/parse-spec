@@ -47,8 +47,8 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 ### 模块结构：createViewer 工厂 + 命名空间注入（2026-08-29 重构）
 
 - `viewer.js` 全部状态与函数封装在 `createViewer()` 工厂内，模块末尾导出 `globalThis.__parseSpecViewerFactory` 并在浏览器环境（有 document/window）导入时立即创建唯一实例；Node 测试经 `tests/helpers/browser_sandbox.js` 静态 require 工厂、每次调用得到全新实例——**测试基建不允许出现 eval/vm/动态 require**。
-- 句子切分纯函数（`S/toWords/buildSentences/跨页合并判定/alignTextDivs/wordAtTextOffset`）在 `viewer_sentences.js`；句子 mark 层与“页码:句序”引用缓存在 `viewer_marks.js`（卸载用 `purgePageMarks`，重开文档用 `clearSentenceMarks`）。两者经 `globalThis.__parseSpecViewerParts` 注入。
-- `app.js` 加载顺序固定：pdf_helpers → viewer_sentences → viewer_marks → viewer；`index.html` 的 modulepreload 列表需与之一致。
+- 句子切分纯函数（`S/toWords/buildSentences/跨页合并判定/alignTextDivs/wordAtTextOffset`）在 `viewer_sentences.js`；句子 mark 层与“页码:句序”引用缓存在 `viewer_marks.js`（卸载用 `purgePageMarks`，重开文档用 `clearSentenceMarks`）；**页面虚拟化与挂载管线在 `viewer_pages.js`**——`createPageVirtualizer(deps)` 工厂内聚 `parsePage/mountPageVisual/unmountPage/observer 调度/LRU 回收/渲染并发闸门/页码坐标` 全部可变状态，viewer 侧状态经 refs/hooks 注入（`getLoadSerial/getCurrentPdf/getPdfZoom` 等），重开文档调 `resetVirtualization()`，虚拟化测试钩子由 `pages.testApi` 委托。
+- `app.js` 加载顺序固定：pdf_helpers → viewer_sentences → viewer_marks → viewer_pages → viewer；`index.html` 的 modulepreload 列表需与之一致。
 
 ### 渲染：两阶段管线 + 页面虚拟化（2026-08-27 重构）
 
@@ -57,7 +57,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - canvas 位图按 `fitCanvasScale(S × devicePixelRatio × pdfZoom)`（封顶 3.2 倍/1600 万像素）渲染；CSS `zoom` 布局体系不变，缩放提交后仅重渲已挂载页的位图（`rerenderMountedCanvases`），高倍缩放不再模糊。
 - 高亮 rect **懒计算**：挂载时只用行级回退矩形（`computeFallbackRects` 纯坐标），字符级精确矩形由 `scheduleExactRectsWarmup`（requestIdleCallback/60ms 回退）升级并重建 mark 层；悬停命中 leading 同步 + rAF trailing 合并；`toggleSentenceMarks` 走 `markElementsByKey` 引用缓存，不再全文档 `querySelectorAll`。
 - 页码统计用缓存的未缩放 `pageTops/pageHeights` 数组 + `pageIndexAtScroll` 二分；术语/复杂词搜索 150ms 防抖；词典保存按词失效 `sentenceResults`。
-- `static/app.js` 并行拉取 `pdf.min.mjs` 与 `pdf_helpers.js`，随后依次注入 `viewer_sentences.js`、`viewer_marks.js` 再加载 `viewer.js`（顺序不可变），`index.html` 有 modulepreload；静态响应带 `Cache-Control: max-age=86400`；`mountPageVisual` 使用 PDF.js 6 的 `TextLayer` 类生成透明文本层。
+- `static/app.js` 并行拉取 `pdf.min.mjs` 与 `pdf_helpers.js`，随后依次注入 `viewer_sentences.js`、`viewer_marks.js`、`viewer_pages.js` 再加载 `viewer.js`（顺序不可变），`index.html` 有 modulepreload；静态响应带 `Cache-Control: max-age=86400`；`mountPageVisual` 使用 PDF.js 6 的 `TextLayer` 类生成透明文本层。
 - 文本层保留原生文本选择/复制；必须保留 PDF.js 6 的 `--total-scale-factor/--text-scale-factor/--font-height/--scale-x` CSS，缺失会导致透明文字宽度和高亮越过页面右侧。
 - `.sentence-mark-layer` 使用每个 TextItem 内的字符偏移和 DOM `Range.getClientRects()` 绘制真实字形范围，坐标估算只作为损坏文本层的回退。
 - 每页还会读取 Link annotation，生成只支持内部目标、安全 named action 和 HTTP(S) 的 `.annotation-layer`；不得执行 PDF JavaScript。
@@ -145,7 +145,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 
 ## 变更记录（2026-08）
 
-- 2026-08-29：全面工程化整改（源自全面分析报告的 8 项路线）——①消除热路径双重 spaCy 解析（`ParsedSentence.lemma_spans` 透传给复杂词识别）；②`bookmarks/glossary/complex_words` 三份用户数据 JSON 出库并加入 `.gitignore`；③新增 GitHub Actions CI（Python 双平台 + npm test）；④新增 `parse/spacy_worker.py` 隔离工作进程，`PARSE_SPEC_PARSE_TIMEOUT` 限时、超时自动降级规则引擎；⑤`viewer.js` 重构为 `createViewer` 工厂并拆分出 `viewer_sentences.js`/`viewer_marks.js`，Node 测试基建移除全部 vm 动态执行（新 `tests/helpers/browser_sandbox.js`）；⑥修复 `wireTextLayer` 高倍缩放下歧义 span 判别失准；⑦翻译层语料化：新增 `parse/translation_corpus.py`（内置短语/模板列表 + 可选用户 `translation_corpus.json`，签名热重载并清除分析缓存），`translator.py` 改为消费语料层的纯引擎；⑧新增 Playwright e2e（`npm run test:e2e`，真实浏览器覆盖加载/点击解析/主题/Esc）。另：`online_dict` 增加 https + 预期词典主机校验与重定向守卫，缓存写合并；`server.py` 增加 Host 白名单；单词校验收紧；词典模块日志统一。测试数 51（Python）+ 46（Node）+ 4（e2e）。
+- 2026-08-29：全面工程化整改（源自全面分析报告的 8 项路线）——①消除热路径双重 spaCy 解析（`ParsedSentence.lemma_spans` 透传给复杂词识别）；②`bookmarks/glossary/complex_words` 三份用户数据 JSON 出库并加入 `.gitignore`；③新增 GitHub Actions CI（Python 双平台 + npm test）；④新增 `parse/spacy_worker.py` 隔离工作进程，`PARSE_SPEC_PARSE_TIMEOUT` 限时、超时自动降级规则引擎；⑤`viewer.js` 重构为 `createViewer` 工厂并拆分出 `viewer_sentences.js`/`viewer_marks.js`/`viewer_pages.js`（虚拟化管线状态内聚 + 依赖注入），Node 测试基建移除全部 vm 动态执行（新 `tests/helpers/browser_sandbox.js`）；⑥修复 `wireTextLayer` 高倍缩放下歧义 span 判别失准；⑦翻译层语料化：新增 `parse/translation_corpus.py`（内置短语/模板列表 + 可选用户 `translation_corpus.json`，签名热重载并清除分析缓存），`translator.py` 改为消费语料层的纯引擎；⑧新增 Playwright e2e（`npm run test:e2e`，真实浏览器覆盖加载/点击解析/主题/Esc）。另：`online_dict` 增加 https + 预期词典主机校验与重定向守卫，缓存写合并；`server.py` 增加 Host 白名单；单词校验收紧；词典模块日志统一；CI YAML 经 js-yaml 结构校验。测试数 51（Python）+ 46（Node）+ 4（e2e）。
 - 2026-08-28：在线词典多源化——`parse/online_dict.py` 从单一 dictionaryapi.dev 改为多源查询：有道（youdao jsonapi）优先、dictionaryapi.dev 回退，单源网络失败熔断跳过 30 分钟，`PARSE_SPEC_DICT_SOURCES` 可调顺序；响应新增在线中文释义（`zh_gloss`）与双语例句（`examples`）字段并在词详情区展示。`/api/complex-words/suggest` 在本地三级源均未命中时，用在线中文释义（去词性前缀）兜底自动填表。背景：dictionaryapi.dev 在境内长期直连超时，导致右击词典详情几乎总是 404。
 - 2026-08-27：性能与词典增强——渲染改为两阶段管线（解析占位 + IO 驱动可见页虚拟化，LRU 8 页、光栅并发 2）；高亮 rect 懒计算 + 悬停 rAF 节流 + mark 引用缓存；缩放提交按 DPR 重渲可见页位图；页码二分统计；搜索防抖；缓存按词失效；modulepreload + 静态 Cache-Control。新增 `/api/word-info`（`parse/online_dict.py`）：右击单词在复杂词弹层展示音标/词性/英文释义/例句/同义词/搭配，dictionaryapi.dev + 磁盘正负缓存 + 离线降级；中文释义仍全部来自本地词表。
 - 2026-08-23：全面优化——PDF.js 由存在安全公告的 2.x 升级到 6.2.108 模块版并加入同步/哈希校验；修复连续打开 PDF 的竞态和单 span 多句无法命中；目录由猴子补丁改为显式模块；增加跨页保守合并、多栏原始阅读顺序、词典热重载、lemma 术语、解析异常可观测性、请求体上限与安全响应头；同步中文 UI、文档和回归测试。
