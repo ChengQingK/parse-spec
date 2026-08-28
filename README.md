@@ -58,7 +58,13 @@ npm ci
 npm test
 ```
 
-`npm test` 会先校验仓库中的 PDF.js 运行文件是否与 `node_modules` 一致，再执行前端回归测试。模块冒烟：
+`npm test` 会先校验仓库中的 PDF.js 运行文件是否与 `node_modules` 一致，再执行前端回归测试。真实浏览器端到端测试（可选，需系统 Edge/Chrome）：
+
+```powershell
+npm run test:e2e
+```
+
+模块冒烟：
 
 ```powershell
 .venv\Scripts\python.exe -m parse.clauser
