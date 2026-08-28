@@ -273,7 +273,7 @@ def _locate_chunks(source: str, chunks: list[Chunk]) -> list[tuple[Chunk, int, i
     return located
 
 
-def _fallback_parse(sentence: str, reason: str = "spaCy 不可用，已使用规则降级解析") -> ParsedSentence:
+def fallback_parse(sentence: str, reason: str = "spaCy 不可用，已使用规则降级解析") -> ParsedSentence:
     chunks = segment_clauses(sentence)
     located = _locate_chunks(sentence, chunks)
     main_parts = [(chunk, start, end) for chunk, start, end in located if chunk.kind == "main"]
@@ -364,7 +364,7 @@ def parse_sentence(text: str) -> ParsedSentence:
         # 保留降级可用性，同时让真正的解析缺陷在日志和响应中可观察。
         LOGGER.exception("spaCy 解析异常，已降级到规则引擎")
         reason = f"spaCy 解析异常（{type(exc).__name__}），已使用规则降级解析"
-    return _fallback_parse(sentence, reason)
+    return fallback_parse(sentence, reason)
 
 
 def _self_test() -> None:

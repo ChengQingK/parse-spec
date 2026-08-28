@@ -13,6 +13,7 @@ from parse.clauser import parse_sentence, split_sentences
 from parse.glossary import Glossary
 from parse.complex_words import ComplexWordTable, extract_complex_words
 from parse.translator import translate_sentence, translate_text
+from parse import spacy_worker
 import parse.online_dict as online_dict
 import parse.spacy_parser as spacy_parser
 import server
@@ -563,6 +564,34 @@ class ApiTests(unittest.TestCase):
                 self.assertNotIn(document_key, json.loads(server._bookmarks_path.read_text(encoding="utf-8")))
         finally:
             server._bookmarks_path = old_path
+
+
+class ParseIsolationTests(unittest.TestCase):
+    def tearDown(self):
+        spacy_worker.disable_isolation()
+
+    def test_disabled_by_default_uses_direct_parse(self):
+        self.assertFalse(spacy_worker.isolation_enabled())
+        parsed = spacy_worker.parse_isolated_or_direct("The register latches data.")
+        self.assertEqual(parsed.engine, "spacy")
+
+    def test_isolated_worker_returns_full_tree(self):
+        spacy_worker.enable_isolation(timeout_seconds=60)
+        try:
+            parsed = spacy_worker.parse_isolated_or_direct("The register latches data.")
+            self.assertIn(parsed.engine, {"spacy", "rule-fallback"})
+            self.assertTrue(parsed.clauses)
+            self.assertTrue(parsed.lemma_spans)  # 序列化往返后 lemma 区间仍可用
+        finally:
+            spacy_worker.disable_isolation()
+
+    def test_timeout_falls_back_to_rule_engine_with_reason(self):
+        spacy_worker.enable_isolation(timeout_seconds=0.05)
+        parsed = spacy_worker.parse_isolated_or_direct(
+            "Although the bus is busy, the controller must stall."
+        )
+        self.assertEqual(parsed.engine, "rule-fallback")
+        self.assertTrue(any("隔离" in warning for warning in parsed.warnings))
 
 
 class OnlineDictionaryTests(unittest.TestCase):

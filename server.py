@@ -59,6 +59,7 @@ except ModuleNotFoundError as exc:
     os.execv(str(project_python), command)
 
 from parse.clauser import parse_sentence
+from parse import spacy_worker
 from parse.complex_words import BUILTIN as COMPLEX_WORD_BUILTIN, ComplexWordTable, extract_complex_words, lemma_for_word
 from parse.glossary import BUILTIN as GLOSSARY_BUILTIN, Glossary
 from parse.online_dict import OnlineDictionary
@@ -127,7 +128,8 @@ def _select_local_port() -> int:
 @lru_cache(maxsize=1024)
 def _analyze_sentence(s: str) -> dict:
     sentence = s.strip()
-    ps = parse_sentence(sentence)
+    # 服务直接运行时解析在隔离工作进程中限时执行；测试与导入场景走同步路径。
+    ps = spacy_worker.parse_isolated_or_direct(sentence)
     # 优先使用 spaCy 的原始词形与 lemma；规则降级结果也提供同构候选词。
     words_hit = {}
     for tok, lemma in ps.term_candidates:
@@ -722,6 +724,7 @@ def add_security_headers(response):
 
 if __name__ == "__main__":
     selected_port = _select_local_port()
+    spacy_worker.enable_isolation()  # 解析移入可超时的工作进程；超时/崩溃自动降级到规则引擎
     if selected_port != DEFAULT_PORT:
         print(f"* 默认端口 {DEFAULT_PORT} 不可用，已自动切换到 {selected_port}")
     print(f"* 访问 http://127.0.0.1:{selected_port}  (本地仅离线使用)")
