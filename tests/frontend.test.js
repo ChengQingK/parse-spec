@@ -1,7 +1,7 @@
 const fs = require("node:fs");
-const vm = require("node:vm");
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { createFreshViewer } = require("./helpers/browser_sandbox");
 const pdfjsPromise = import("pdfjs-dist/legacy/build/pdf.mjs");
 
 
@@ -144,20 +144,23 @@ function loadViewer(
       setItem: (key, value) => storage.set(key, String(value)),
     },
   };
+  globalThis.pdfjsLib = { GlobalWorkerOptions: {}, ...(settings.pdfjsLib || {}) };
+  globalThis.document = document;
+  globalThis.window = window;
+  globalThis.fetch = fetchImpl;
+  globalThis.getComputedStyle = (element) => ({ getPropertyValue: (name) => element.style.getPropertyValue(name) });
+  const instance = createFreshViewer();
   const context = {
     console,
     Map,
     Promise,
-    pdfjsLib: { GlobalWorkerOptions: {}, ...(settings.pdfjsLib || {}) },
     document,
     window,
     fetch: fetchImpl,
-    getComputedStyle: (element) => ({ getPropertyValue: (name) => element.style.getPropertyValue(name) }),
     setTimeout,
     clearTimeout,
+    ...instance,
   };
-  vm.runInNewContext(fs.readFileSync("static/pdf_helpers.js", "utf8"), context);
-  vm.runInNewContext(fs.readFileSync("static/viewer.js", "utf8"), context);
   return {
     context,
     elements,

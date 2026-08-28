@@ -1,8 +1,8 @@
 const fs = require('node:fs');
-const vm = require('node:vm');
 const path = require('node:path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { createFreshViewer } = require('./helpers/browser_sandbox');
 
 class FakeClassList {
   constructor() { this.values = new Set(); }
@@ -168,14 +168,13 @@ function loadViewer({ narrow = false, preset = null, legacyBookmarks = null } = 
     const text = JSON.parse(options.body).sentences[0];
     return { ok: true, status: 200, json: async () => ({ results: [resultFor(text)] }) };
   };
-  const context = {
-    console, Map, Set, Object, JSON, Promise, setTimeout, clearTimeout,
-    document, window, fetch,
-    pdfjsLib: { GlobalWorkerOptions: {} },
-    getComputedStyle: (el) => ({ getPropertyValue: (name) => el.style.getPropertyValue(name) }),
-  };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'static', 'pdf_helpers.js'), 'utf8'), context);
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'static', 'viewer.js'), 'utf8'), context);
+  globalThis.pdfjsLib = { GlobalWorkerOptions: {} };
+  globalThis.document = document;
+  globalThis.window = window;
+  globalThis.fetch = fetch;
+  globalThis.getComputedStyle = (el) => ({ getPropertyValue: (name) => el.style.getPropertyValue(name) });
+  const instance = createFreshViewer();
+  const context = { document, window, fetch, ...instance };
   return { context, els, storage, projectBookmarks, projectComplexWords, flushAnimationFrames, getPendingFrameCount: () => frameCallbacks.size, getFetchCount: () => fetchCount };
 }
 

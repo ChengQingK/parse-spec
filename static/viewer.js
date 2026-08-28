@@ -1,22 +1,26 @@
-/* Parse-Spec 前端：pdf.js 渲染、可复制文本层、句子选择、目录与可停靠分析栏。 */
+/* Parse-Spec 前端：pdf.js 渲染、可复制文本层、句子选择、目录与可停靠分析栏。
+ *
+ * 全部状态与函数都封装在 createViewer 工厂内：浏览器导入本模块时立即创建唯一
+ * 实例；Node 回归测试通过 globalThis.__parseSpecViewerFactory 按需创建全新实例，
+ * 每个实例等价于一次全新的页面加载，测试基建因此无需动态执行任何代码。 */
+function createViewer() {
+  const pdfjsLib = globalThis.pdfjsLib;
+  if (!pdfjsLib) throw new Error("PDF.js 尚未加载");
+  const pdfHelpers = globalThis.__parseSpecPdfHelpers;
+  if (!pdfHelpers) throw new Error("PDF 阅读辅助模块尚未加载");
+  const {
+    buildSentenceDomRects,
+    buildSentenceLineRects,
+    computeFallbackRects,
+    debounce,
+    fitCanvasScale,
+    pageIndexAtScroll,
+    resolvePdfDestination,
+    targetAtPoint,
+  } = pdfHelpers;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdf.worker.min.mjs";
 
-const pdfjsLib = globalThis.pdfjsLib;
-if (!pdfjsLib) throw new Error("PDF.js 尚未加载");
-const pdfHelpers = globalThis.__parseSpecPdfHelpers;
-if (!pdfHelpers) throw new Error("PDF 阅读辅助模块尚未加载");
-const {
-  buildSentenceDomRects,
-  buildSentenceLineRects,
-  computeFallbackRects,
-  debounce,
-  fitCanvasScale,
-  pageIndexAtScroll,
-  resolvePdfDestination,
-  targetAtPoint,
-} = pdfHelpers;
-pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdf.worker.min.mjs";
-
-const S = 1.4;
+  const S = 1.4;
 const PAGE_GAP_PX = 20;              // 与 style.css #pages 的 gap 保持一致
 const MOUNTED_PAGE_LIMIT = 8;        // 页面虚拟化：最多同时挂载的页数
 const MOUNT_SETTLE_MS = 120;         // 进入视距后的挂载沉降，过滤快速掠过
@@ -2953,7 +2957,7 @@ restoreOutlineWidth();
 restorePdfZoom();
 
 /* 测试钩子：暴露虚拟化内部状态只读访问，供回归测试验证挂载/回收语义。生产环境不依赖。 */
-globalThis.__parseSpecViewerTest = {
+const testHooks = {
   get mountedPageCount() { return mountedPages.size; },
   get mountedPageNums() { return [...mountedPages.keys()]; },
   get hasPageObserver() { return Boolean(pageObserver); },
@@ -2978,3 +2982,46 @@ function esc(value) {
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]
   ));
 }
+
+/* 实例公开面：浏览器运行时内部自洽，回归测试通过它驱动阅读器行为。 */
+return {
+  __parseSpecViewerTest: testHooks,
+  alignTextDivs,
+  buildSentences,
+  createPageTargets,
+  documentBookmarks,
+  endNavResize,
+  endResize,
+  loadDocumentBookmarks,
+  moveNavResize,
+  moveResize,
+  openPdf,
+  openRecentDocuments,
+  rememberRecentDocument,
+  renderAnalysisPanel,
+  renderAnnotationLayer,
+  saveDocumentBookmarks,
+  sentenceText,
+  setAnalysisDepth,
+  setBookmarksOpen,
+  setDocumentLabel,
+  setOutlineOpen,
+  setOutlineWidth,
+  setPanelCollapsed,
+  setPanelWidth,
+  setPdfZoom,
+  setStructureView,
+  setTheme,
+  startNavResize,
+  startResize,
+  submitComplexWord,
+  toWords,
+  toggleTranslationTerm,
+  wireTextLayer,
+  wordAtTextOffset,
+};
+}
+
+globalThis.__parseSpecViewerFactory = createViewer;
+// 浏览器页面导入时立即完成一次初始化；Node 测试改为按需调用工厂创建实例。
+if (globalThis.document && globalThis.window) createViewer();

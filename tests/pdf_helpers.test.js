@@ -1,12 +1,10 @@
 const fs = require("node:fs");
-const vm = require("node:vm");
 const test = require("node:test");
 const assert = require("node:assert/strict");
+require("../static/pdf_helpers.js");
 
 function loadHelpers() {
-  const context = { console, Promise, setTimeout, clearTimeout };
-  vm.runInNewContext(fs.readFileSync("static/pdf_helpers.js", "utf8"), context);
-  return context.__parseSpecPdfHelpers;
+  return globalThis.__parseSpecPdfHelpers;
 }
 
 test("句子标记按真实词坐标覆盖每一行完整范围", () => {
