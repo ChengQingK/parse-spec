@@ -32,3 +32,6 @@ word_cache.json
 Thumbs.db
 
 .mimosa
+# Playwright 产物
+test-results/
+playwright-report/

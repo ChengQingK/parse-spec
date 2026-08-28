@@ -9,7 +9,8 @@
   "scripts": {
     "sync:pdfjs": "node scripts/sync_pdfjs.js",
     "verify:pdfjs": "node scripts/sync_pdfjs.js --check",
-    "test": "npm run verify:pdfjs && node --test tests/*.test.js"
+    "test": "npm run verify:pdfjs && node --test tests/*.test.js",
+    "test:e2e": "playwright test"
   },
   "engines": {
     "node": ">=22.13.0"
@@ -18,6 +19,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "pdfjs-dist": "6.2.108"
   }
 }
