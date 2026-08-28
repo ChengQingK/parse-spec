@@ -1540,7 +1540,10 @@ async function suggestComplexWordMeaning(word) {
     if (complexWordZh) complexWordZh.value = suggestion.zh || "";
     if (complexWordLevel) complexWordLevel.value = suggestion.level || "较难";
     if (complexWordNote) complexWordNote.value = suggestion.note || "";
-    if (complexWordMessage) complexWordMessage.textContent = `已自动填充“${word}”的本地释义，请确认后保存。`;
+    if (complexWordMessage) {
+      const origin = suggestion.source === "online" ? "在线词典" : "本地词典";
+      complexWordMessage.textContent = `已自动填充“${word}”的${origin}释义，请确认后保存。`;
+    }
   } catch (error) {
     if (requestId !== complexWordSuggestionSerial) return;
     if (complexWordMessage) {
@@ -1567,7 +1570,9 @@ function renderWordInfoHtml(word, info) {
       ${info.phonetic ? `<span class="word-info-phonetic">${esc(info.phonetic)}</span>` : ""}
       <span class="word-info-source">${esc(info.source || "在线词典")}</span>
     </div>
+    ${chips("在线中文", info.zh_gloss)}
     ${posHtml}
+    ${(info.examples || []).map((example) => `<div class="word-info-example">例：${esc(example)}</div>`).join("")}
     ${chips("搭配", info.collocations)}
     <div class="word-info-actions">
       <button class="secondary-action" type="button" data-word-info-action="show-translation"${selectedTarget ? "" : " disabled"}>查看当前句译文</button>

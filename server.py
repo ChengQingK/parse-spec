@@ -566,7 +566,18 @@ def suggest_complex_word():
                 "level": "较难", "note": "自动取自本地结构翻译词库",
                 "source": "translator",
             }})
-    return jsonify({"error": "本地词典暂未收录该单词，无法可靠生成释义"}), 404
+    # 本地三级源都未命中时，用在线词典的中文释义兜底（有道中文释义更适合人工确认）。
+    for candidate in candidates:
+        info = _online_dict.lookup(candidate)
+        glosses = info.get("zh_gloss") if isinstance(info, dict) else None
+        if glosses:
+            zh = re.sub(r"^[a-z]+\.\s*", "", str(glosses[0])).strip() or str(glosses[0])
+            return jsonify({"suggestion": {
+                "word": word, "lemma": candidate, "zh": zh,
+                "level": "较难", "note": "自动取自在线词典，请确认后保存",
+                "source": "online",
+            }})
+    return jsonify({"error": "本地词典与在线词典均未收录该单词，请手动填写释义"}), 404
 
 
 @app.get("/api/word-info")

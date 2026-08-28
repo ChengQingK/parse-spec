@@ -95,9 +95,9 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 `server.py` 还暴露以下端点（均仅本地、带输入限制、安全响应头和原子 JSON 写入）：
 
 - `/api/glossary`：术语表 GET/POST/DELETE，及 `/api/glossary/backups`（备份列表/创建/读取/删除）和 `/api/glossary/restore`（恢复）。
-- `/api/complex-words`：复杂词表 GET/POST/DELETE，及 `/api/complex-words/suggest`（添加时按复杂词表→术语表→本地翻译词典顺序建议释义）。
+- `/api/complex-words`：复杂词表 GET/POST/DELETE，及 `/api/complex-words/suggest`（添加时按复杂词表→术语表→本地翻译词典顺序建议释义，本地均未命中时再用在线词典的中文释义兜底）。
 - `/api/bookmarks`：书签 GET/POST，统一持久化到根目录 `bookmarks.json`。
-- `/api/word-info`：在线词典详情（音标/词性/英文释义/例句/同义词/搭配），由 `parse/online_dict.py` 经 dictionaryapi.dev 查询，2.5s 超时、内存+`word_cache.json` 磁盘正负缓存（命中永久有效、未收录 24h、网络错误 1h TTL）；失败返回 404，前端回退为仅显示本地释义。整句翻译路径不经过此端点。
+- `/api/word-info`：在线词典详情（音标/在线中文释义/词性/英文释义/双语例句/同义词/搭配），由 `parse/online_dict.py` 多源查询——默认有道（youdao）优先、dictionaryapi.dev（freeapi）回退，`PARSE_SPEC_DICT_SOURCES` 环境变量可调整顺序；单源网络失败会熔断跳过 30 分钟，避免每次查询都等待超时。2.5s 超时、内存+`word_cache.json` 磁盘正负缓存（命中永久有效、未收录 24h、网络错误 1h TTL）；失败返回 404，前端回退为仅显示本地释义。整句翻译路径不经过此端点。
 
 `POST /api/analyze` 请求：
 ```json
@@ -131,11 +131,12 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - `glossary.json` 位于项目根目录，格式 `{ "word": { "pos": ..., "zh": ..., "note": ... } }`；用户词条优先于 `BUILTIN`，保存后下一次请求自动重载。
 - spaCy 路径用 tokenizer 与 lemma 抽取术语；规则降级路径仍依赖正则候选和 `Glossary.lookup` 的轻量后缀还原。
 - 跨页合并是保守启发式：下一页以专有名词或大写缩写续接时可能只给出“疑似截断”提示；表格和 PDF 自身错误阅读顺序仍可能误切。
-- `/api/word-info` 依赖 dictionaryapi.dev：无网络或未收录时详情区显示“在线详情不可用”，中文释义始终来自本地词表，不受网络影响；`word_cache.json` 是运行期缓存，不提交 Git。
+- `/api/word-info` 依赖在线词典（有道 + dictionaryapi.dev）：全部源失败或未收录时详情区显示“在线详情不可用”；解析译文中的中文释义始终来自本地词表，不受网络影响（复杂词添加弹层里的“在线中文”释义除外，会明确标注来源）。`word_cache.json` 是运行期缓存，不提交 Git。
 - 页面虚拟化以占位高度估算滚动位置，极端变高页的滚动锚点在挂载/卸载瞬间可能有轻微偏移；`page.cleanup()` 后重渲依赖 pdf.js 重新解析，超大页重渲仍有成本。
 
 ## 变更记录（2026-08）
 
+- 2026-08-28：在线词典多源化——`parse/online_dict.py` 从单一 dictionaryapi.dev 改为多源查询：有道（youdao jsonapi）优先、dictionaryapi.dev 回退，单源网络失败熔断跳过 30 分钟，`PARSE_SPEC_DICT_SOURCES` 可调顺序；响应新增在线中文释义（`zh_gloss`）与双语例句（`examples`）字段并在词详情区展示。`/api/complex-words/suggest` 在本地三级源均未命中时，用在线中文释义（去词性前缀）兜底自动填表。背景：dictionaryapi.dev 在境内长期直连超时，导致右击词典详情几乎总是 404。
 - 2026-08-27：性能与词典增强——渲染改为两阶段管线（解析占位 + IO 驱动可见页虚拟化，LRU 8 页、光栅并发 2）；高亮 rect 懒计算 + 悬停 rAF 节流 + mark 引用缓存；缩放提交按 DPR 重渲可见页位图；页码二分统计；搜索防抖；缓存按词失效；modulepreload + 静态 Cache-Control。新增 `/api/word-info`（`parse/online_dict.py`）：右击单词在复杂词弹层展示音标/词性/英文释义/例句/同义词/搭配，dictionaryapi.dev + 磁盘正负缓存 + 离线降级；中文释义仍全部来自本地词表。
 - 2026-08-23：全面优化——PDF.js 由存在安全公告的 2.x 升级到 6.2.108 模块版并加入同步/哈希校验；修复连续打开 PDF 的竞态和单 span 多句无法命中；目录由猴子补丁改为显式模块；增加跨页保守合并、多栏原始阅读顺序、词典热重载、lemma 术语、解析异常可观测性、请求体上限与安全响应头；同步中文 UI、文档和回归测试。
 - 2026-08-20：新增主题、三档解析密度、分析栏五种位置、完整句子坐标标记和 PDF 目录导航。

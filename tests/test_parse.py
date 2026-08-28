@@ -15,6 +15,13 @@ import parse.spacy_parser as spacy_parser
 import server
 
 
+class _NullOnlineDict:
+    """suggest 测试用：本地未命中且不联网。"""
+
+    def lookup(self, word):
+        return None
+
+
 class SentenceParserTests(unittest.TestCase):
     def test_split_sentences_keeps_abbreviation_and_decimal(self):
         text = "See Fig. 2 at 1.25 V. The register is valid."
@@ -364,6 +371,8 @@ class ApiTests(unittest.TestCase):
         old_path = server._complex_words_path
         old_table = server._complex_words
         old_signature = server._complex_words_signature
+        old_online_dict = server._online_dict
+        server._online_dict = _NullOnlineDict()
         try:
             with tempfile.TemporaryDirectory() as directory:
                 server._complex_words_path = Path(directory) / "complex_words.json"
@@ -399,7 +408,37 @@ class ApiTests(unittest.TestCase):
             server._complex_words_path = old_path
             server._complex_words = old_table
             server._complex_words_signature = old_signature
+            server._online_dict = old_online_dict
             server._analyze_sentence.cache_clear()
+
+    def test_complex_word_suggest_falls_back_to_online_zh_gloss(self):
+        class YoudaoLikeOnlineDict:
+            def lookup(self, word):
+                if word == "generally":
+                    return {
+                        "word": "generally",
+                        "phonetic": "/ˈdʒen(ə)rəli/",
+                        "pos_entries": [],
+                        "examples": [],
+                        "collocations": [],
+                        "zh_gloss": ["adv. 笼统地，大概；通常，普遍地"],
+                        "source": "youdao",
+                    }
+                return None
+
+        old_online_dict = server._online_dict
+        server._online_dict = YoudaoLikeOnlineDict()
+        try:
+            suggested = self.client.get("/api/complex-words/suggest", query_string={"word": "generally"})
+            self.assertEqual(suggested.status_code, 200)
+            suggestion = suggested.get_json()["suggestion"]
+            self.assertEqual(suggestion["zh"], "笼统地，大概；通常，普遍地")  # 去掉词性前缀
+            self.assertEqual(suggestion["source"], "online")
+
+            missing = self.client.get("/api/complex-words/suggest", query_string={"word": "zzzzunknown"})
+            self.assertEqual(missing.status_code, 404)
+        finally:
+            server._online_dict = old_online_dict
 
     def test_word_info_validates_input_and_returns_details(self):
         class FakeOnlineDict:
@@ -568,6 +607,104 @@ class OnlineDictionaryTests(unittest.TestCase):
         dictionary._fetch = lambda word: self.fail("非法单词不应触发网络请求")
         self.assertIsNone(dictionary.lookup("two words"))
         self.assertIsNone(dictionary.lookup(""))
+
+    YOUDAO_PAYLOAD = {
+        "ec": {
+            "word": [{
+                "usphone": "ˈdʒen(ə)rəli",
+                "ukphone": "ˈdʒen(ə)rəli",
+                "trs": [{"tr": [{"l": {"i": "adv. 笼统地，大概；通常，普遍地"}}]}],
+                "return-phrase": {"l": {"i": "generally"}},
+            }],
+        },
+        "ee": {
+            "source": {"name": "WordNet", "url": "https://wordnet.princeton.edu"},
+            "word": {
+                "trs": [{
+                    "pos": "adv.",
+                    "tr": [
+                        {
+                            "l": {"i": "usually; as a rule"},
+                            "similar-words": [{"similar": "by and large"}, {"similar": "mostly"}],
+                        },
+                        {"l": {"i": "without distinction of one from others"}},
+                    ],
+                }],
+                "phone": "'dʒenərəli",
+            },
+        },
+        "blng_sents_part": {
+            "sentence-count": 1,
+            "sentence-pair": [{
+                "sentence": "The plan was generally welcomed.",
+                "sentence-eng": "The plan was <b>generally</b> welcomed.",
+                "sentence-translation": "这个计划受到普遍的欢迎。",
+            }],
+        },
+    }
+
+    def test_normalize_youdao_collects_zh_gloss_definitions_and_examples(self):
+        info = online_dict._normalize_youdao(self.YOUDAO_PAYLOAD, "generally")
+        self.assertEqual(info["phonetic"], "/ˈdʒen(ə)rəli/")
+        self.assertEqual(info["source"], "youdao")
+        self.assertEqual(info["zh_gloss"], ["adv. 笼统地，大概；通常，普遍地"])
+        self.assertEqual(info["pos_entries"][0]["pos"], "adv.")
+        self.assertEqual(info["pos_entries"][0]["definitions"], ["usually; as a rule", "without distinction of one from others"])
+        self.assertIn("mostly", info["pos_entries"][0]["synonyms"])
+        self.assertEqual(info["examples"], ["The plan was generally welcomed.（这个计划受到普遍的欢迎。）"])
+
+    def test_normalize_youdao_rejects_missing_or_malformed_payload(self):
+        self.assertIsNone(online_dict._normalize_youdao({"input": "zzz", "lang": "en"}, "zzz"))  # 未收录
+        self.assertIsNone(online_dict._normalize_youdao(None, "zzz"))
+
+    def test_fetch_tries_sources_in_order_until_hit(self):
+        calls = []
+
+        def youdao_miss(word):
+            calls.append(("youdao", word))
+            return "not_found", None
+
+        def freeapi_hit(word):
+            calls.append(("freeapi", word))
+            return "hit", {"word": word, "phonetic": "/x/", "pos_entries": [{"pos": "noun", "definitions": ["ok"], "examples": [], "synonyms": []}], "collocations": [], "source": "dictionaryapi.dev"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            dictionary = online_dict.OnlineDictionary(Path(directory) / "cache.json", sources=("youdao", "freeapi"))
+            with patch.dict(online_dict.PROVIDERS, {"youdao": youdao_miss, "freeapi": freeapi_hit}):
+                self.assertIsNotNone(dictionary.lookup("party"))
+        self.assertEqual(calls, [("youdao", "party"), ("freeapi", "party")])
+
+    def test_fetch_breaker_skips_recently_failed_source(self):
+        calls = []
+
+        def youdao_error(word):
+            calls.append(("youdao", word))
+            return "error", None
+
+        def freeapi_hit(word):
+            calls.append(("freeapi", word))
+            return "hit", {"word": word, "phonetic": "/x/", "pos_entries": [{"pos": "noun", "definitions": ["ok"], "examples": [], "synonyms": []}], "collocations": [], "source": "dictionaryapi.dev"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            dictionary = online_dict.OnlineDictionary(Path(directory) / "cache.json", sources=("youdao", "freeapi"))
+            with patch.dict(online_dict.PROVIDERS, {"youdao": youdao_error, "freeapi": freeapi_hit}):
+                self.assertIsNotNone(dictionary.lookup("party"))       # 首次：youdao 失败并熔断，freeapi 兜底
+                self.assertIsNotNone(dictionary.lookup("evaluation"))  # 熔断期内 youdao 被跳过
+        self.assertEqual(
+            calls,
+            [("youdao", "party"), ("freeapi", "party"), ("freeapi", "evaluation")],
+        )
+
+    def test_fetch_reports_error_when_all_sources_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dictionary = online_dict.OnlineDictionary(Path(directory) / "cache.json", sources=("youdao",))
+            with patch.dict(online_dict.PROVIDERS, {"youdao": lambda word: ("error", None)}):
+                self.assertIsNone(dictionary.lookup("party"))
+            self.assertEqual(dictionary.sources, ["youdao"])
+
+    def test_unknown_source_names_fall_back_to_defaults(self):
+        dictionary = online_dict.OnlineDictionary(Path(tempfile.mkdtemp()) / "cache.json", sources=("nope", "freeapi"))
+        self.assertEqual(dictionary.sources, ["freeapi"])
 
 
 if __name__ == "__main__":
