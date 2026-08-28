@@ -21,6 +21,15 @@
   --relative: #087ea4;
   --basis: #64748b;
   --content: #53657d;
+  --danger: #b42318;
+  --danger-soft: #feecec;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --danger: #ff6b61;
+    --danger-soft: rgba(255, 107, 97, .14);
+  }
 }
 
 * { box-sizing: border-box; }
@@ -341,7 +350,6 @@ label:focus-within,
   cursor: text;
   transform-origin: 0 0;
   border-radius: 2px;
-  transition: background-color .1s ease, box-shadow .1s ease;
 }
 
 .textLayer > :not(.markedContent),

@@ -61,6 +61,7 @@ except ModuleNotFoundError as exc:
 from parse.clauser import parse_sentence
 from parse.complex_words import BUILTIN as COMPLEX_WORD_BUILTIN, ComplexWordTable, extract_complex_words, lemma_for_word
 from parse.glossary import BUILTIN as GLOSSARY_BUILTIN, Glossary
+from parse.online_dict import OnlineDictionary
 from parse.translator import lookup_word_translation, translate_sentence
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -76,6 +77,8 @@ _complex_words_path = Path(BASE) / "complex_words.json"
 _complex_words = ComplexWordTable(_complex_words_path)
 _complex_words_signature: tuple[int, int] | None = None
 _bookmarks_path = Path(BASE) / "bookmarks.json"
+_word_cache_path = Path(BASE) / "word_cache.json"
+_online_dict = OnlineDictionary(_word_cache_path)
 MAX_SENTENCES = 32
 MAX_SENTENCE_CHARS = 10_000
 MAX_REQUEST_BYTES = 400_000
@@ -375,7 +378,10 @@ def index():
 
 @app.route("/static/<path:name>")
 def static_files(name):
-    return send_from_directory(STATIC, name)
+    response = send_from_directory(STATIC, name)
+    # 静态资源内容随发布整体更新，本地工具可安全缓存，避免每次启动重复传输。
+    response.headers["Cache-Control"] = "public, max-age=86400"
+    return response
 
 
 @app.post("/api/analyze")
@@ -561,6 +567,23 @@ def suggest_complex_word():
                 "source": "translator",
             }})
     return jsonify({"error": "本地词典暂未收录该单词，无法可靠生成释义"}), 404
+
+
+@app.get("/api/word-info")
+def word_info():
+    """查询在线词典详情（音标/词性/英文释义/例句/同义词/搭配）。
+
+    联网只发生在本端点，带磁盘缓存与短超时；整句翻译路径不经过这里。
+    """
+    word = request.args.get("word", "").strip().lower()
+    if not re.fullmatch(r"[a-z][a-z'-]*", word):
+        return jsonify({"error": "必须是单个英文单词"}), 400
+    lemma = lemma_for_word(word) or word
+    for candidate in dict.fromkeys((word, lemma)):
+        info = _online_dict.lookup(candidate)
+        if info:
+            return jsonify({"info": info})
+    return jsonify({"error": "在线词典暂未收录该单词或网络不可用"}), 404
 
 
 @app.get("/api/complex-words")

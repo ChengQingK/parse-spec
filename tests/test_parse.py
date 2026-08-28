@@ -10,6 +10,7 @@ from parse.clauser import parse_sentence, split_sentences
 from parse.glossary import Glossary
 from parse.complex_words import ComplexWordTable, extract_complex_words
 from parse.translator import translate_sentence, translate_text
+import parse.online_dict as online_dict
 import parse.spacy_parser as spacy_parser
 import server
 
@@ -400,6 +401,42 @@ class ApiTests(unittest.TestCase):
             server._complex_words_signature = old_signature
             server._analyze_sentence.cache_clear()
 
+    def test_word_info_validates_input_and_returns_details(self):
+        class FakeOnlineDict:
+            def lookup(self, word):
+                if word == "interfere":
+                    return {
+                        "word": "interfere",
+                        "phonetic": "/ˌɪntəˈfɪə(r)/",
+                        "pos_entries": [{
+                            "pos": "verb",
+                            "definitions": ["Prevent from continuing."],
+                            "examples": ["Noise may interfere with reception."],
+                            "synonyms": ["disrupt"],
+                        }],
+                        "collocations": ["interfere with"],
+                        "source": "dictionaryapi.dev",
+                    }
+                return None
+
+        old_online_dict = server._online_dict
+        server._online_dict = FakeOnlineDict()
+        try:
+            invalid = self.client.get("/api/word-info", query_string={"word": "two words"})
+            self.assertEqual(invalid.status_code, 400)
+
+            hit = self.client.get("/api/word-info", query_string={"word": "interfere"})
+            self.assertEqual(hit.status_code, 200)
+            info = hit.get_json()["info"]
+            self.assertEqual(info["phonetic"], "/ˌɪntəˈfɪə(r)/")
+            self.assertEqual(info["pos_entries"][0]["pos"], "verb")
+            self.assertEqual(info["collocations"], ["interfere with"])
+
+            missing = self.client.get("/api/word-info", query_string={"word": "zzzzunknown"})
+            self.assertEqual(missing.status_code, 404)
+        finally:
+            server._online_dict = old_online_dict
+
     def test_bookmark_api_reads_writes_and_removes_project_file_entries(self):
         old_path = server._bookmarks_path
         try:
@@ -441,6 +478,96 @@ class ApiTests(unittest.TestCase):
                 self.assertNotIn(document_key, json.loads(server._bookmarks_path.read_text(encoding="utf-8")))
         finally:
             server._bookmarks_path = old_path
+
+
+class OnlineDictionaryTests(unittest.TestCase):
+    PAYLOAD = [{
+        "word": "interfere",
+        "phonetics": [{"text": "/ˌɪntəˈfɪə(r)/", "audio": ""}],
+        "meanings": [{
+            "partOfSpeech": "verb",
+            "synonyms": ["hinder"],
+            "definitions": [
+                {
+                    "definition": "Prevent (a process or activity) from continuing or being carried out properly.",
+                    "example": "Noise may interfere with reception.",
+                    "synonyms": ["disrupt"],
+                },
+                {"definition": "Intervene in a situation without invitation or necessity."},
+            ],
+        }],
+    }]
+
+    def test_normalize_collects_phonetic_pos_synonyms_and_collocations(self):
+        info = online_dict._normalize(self.PAYLOAD, "interfere")
+        self.assertEqual(info["phonetic"], "/ˌɪntəˈfɪə(r)/")
+        self.assertEqual(info["pos_entries"][0]["pos"], "verb")
+        self.assertEqual(len(info["pos_entries"][0]["definitions"]), 2)
+        self.assertIn("disrupt", info["pos_entries"][0]["synonyms"])
+        self.assertIn("hinder", info["pos_entries"][0]["synonyms"])
+        self.assertEqual(info["collocations"], ["interfere with"])
+        self.assertEqual(info["source"], "dictionaryapi.dev")
+
+    def test_normalize_rejects_empty_payload(self):
+        self.assertIsNone(online_dict._normalize([], "void"))
+        self.assertIsNone(online_dict._normalize([{"meanings": []}], "void"))
+
+    def test_lookup_caches_positive_and_negative_results_on_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "word_cache.json"
+            dictionary = online_dict.OnlineDictionary(cache_path)
+            calls = []
+
+            def fake_fetch(word):
+                calls.append(word)
+                if word == "interfere":
+                    return "hit", online_dict._normalize(self.PAYLOAD, word)
+                return "not_found", None
+
+            dictionary._fetch = fake_fetch
+            self.assertIsNotNone(dictionary.lookup("interfere"))
+            self.assertIsNone(dictionary.lookup("zzzzunknown"))
+            dictionary.lookup("interfere")
+            dictionary.lookup("zzzzunknown")
+            self.assertEqual(calls, ["interfere", "zzzzunknown"])  # 命中缓存后不再联网
+
+            reloaded = online_dict.OnlineDictionary(cache_path)
+            reloaded._fetch = fake_fetch
+            self.assertIsNotNone(reloaded.lookup("interfere"))
+            self.assertIsNone(reloaded.lookup("zzzzunknown"))  # 磁盘负缓存同样生效
+            self.assertEqual(calls, ["interfere", "zzzzunknown"])
+
+    def test_expired_semantics_distinguish_hit_not_found_and_error(self):
+        from datetime import timedelta
+        now = online_dict._now()
+        recent = (now - timedelta(minutes=5)).isoformat()
+        two_hours_ago = (now - timedelta(hours=2)).isoformat()
+        two_days_ago = (now - timedelta(days=2)).isoformat()
+        hit_record = {"fetched_at": two_days_ago, "status": "hit", "result": {"word": "x"}}
+        self.assertFalse(online_dict.OnlineDictionary._expired(hit_record))  # 命中永久有效
+        self.assertFalse(online_dict.OnlineDictionary._expired({"fetched_at": recent, "status": "not_found", "result": None}))
+        self.assertTrue(online_dict.OnlineDictionary._expired({"fetched_at": two_days_ago, "status": "not_found", "result": None}))
+        self.assertFalse(online_dict.OnlineDictionary._expired({"fetched_at": recent, "status": "error", "result": None}))
+        self.assertTrue(online_dict.OnlineDictionary._expired({"fetched_at": two_hours_ago, "status": "error", "result": None}))
+        # 旧格式缓存（无 status 字段）按 result 推断
+        self.assertFalse(online_dict.OnlineDictionary._expired({"fetched_at": two_days_ago, "result": {"word": "x"}}))
+
+    def test_normalize_survives_malformed_fields(self):
+        malformed = [{
+            "phonetics": "not-a-list",
+            "meanings": 42,
+        }, {
+            "meanings": [{"partOfSpeech": "noun", "synonyms": "oops", "definitions": [{"definition": "ok"}]}],
+        }]
+        info = online_dict._normalize(malformed, "word")
+        self.assertEqual(info["pos_entries"][0]["definitions"], ["ok"])
+        self.assertEqual(info["pos_entries"][0]["synonyms"], [])
+
+    def test_lookup_rejects_invalid_words_without_fetching(self):
+        dictionary = online_dict.OnlineDictionary(Path(tempfile.mkdtemp()) / "cache.json")
+        dictionary._fetch = lambda word: self.fail("非法单词不应触发网络请求")
+        self.assertIsNone(dictionary.lookup("two words"))
+        self.assertIsNone(dictionary.lookup(""))
 
 
 if __name__ == "__main__":

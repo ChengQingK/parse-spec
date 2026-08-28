@@ -1,6 +1,8 @@
-/* 先加载模块版 PDF.js，再启动保持零构建步骤的阅读器脚本。 */
-import * as pdfjsLib from "/static/pdf.min.mjs";
+/* 先加载模块版 PDF.js，再启动保持零构建步骤的阅读器脚本。
+   pdf_helpers 与 pdf.min 并行拉取，执行顺序仍保持 helpers 先于 viewer。 */
+const helpersPromise = import("/static/pdf_helpers.js");
+const pdfjs = await import("/static/pdf.min.mjs");
 
-globalThis.pdfjsLib = pdfjsLib;
-await import("/static/pdf_helpers.js");
+globalThis.pdfjsLib = pdfjs;
+await helpersPromise;
 await import("/static/viewer.js");

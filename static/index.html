@@ -8,6 +8,9 @@
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/settings.css">
 <link rel="stylesheet" href="/static/pdf_reader.css">
+<link rel="modulepreload" href="/static/pdf.min.mjs">
+<link rel="modulepreload" href="/static/pdf_helpers.js">
+<link rel="modulepreload" href="/static/viewer.js">
 </head>
 <body>
 <header class="topbar">
@@ -177,7 +180,8 @@
         <label class="glossary-field-pos">难度<select id="complex-word-level" name="level"><option value="进阶">进阶</option><option value="较难" selected>较难</option></select></label>
         <label class="glossary-field-zh">中文释义<input id="complex-word-zh" name="zh" required maxlength="240" placeholder="例如 干扰；妨碍"></label>
         <label class="glossary-field-note">说明<textarea id="complex-word-note" name="note" maxlength="800" rows="4" placeholder="可选：解释该词在技术文档中的常见含义"></textarea></label>
-        <p id="complex-word-message" class="glossary-message" aria-live="polite">在句子分析原文中右击单词，会自动查询本地释义并填入这里。</p>
+        <section id="complex-word-info" class="word-info" aria-live="polite" hidden></section>
+        <p id="complex-word-message" class="glossary-message" aria-live="polite">在句子分析原文中右击单词，会自动查询释义并显示词典详情。</p>
         <div class="glossary-form-actions">
           <button id="complex-word-delete" class="secondary-action danger-action" type="button" disabled>删除自定义复杂词</button>
           <button class="btn" type="submit">保存到 complex_words.json</button>

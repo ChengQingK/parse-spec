@@ -77,7 +77,7 @@ function loadViewer({ narrow = false, preset = null, legacyBookmarks = null } = 
     'recent-docs','recent-docs-menu','recent-docs-list','theme-cycle','theme-icon',
     'depth-concise','depth-standard','depth-detailed','structure-bracket','structure-linked',
     'outline-toggle','outline-panel','outline-close','outline-content','bookmark-toggle','bookmark-panel','bookmark-close','bookmark-name','bookmark-add','bookmark-content','nav-resizer','doc',
-    'page-status','zoom-out','zoom-reset','zoom-in','panel-source-text','complex-word-toggle','complex-word-dialog','complex-word-close','complex-word-search','complex-word-list','complex-word-form','complex-word-word','complex-word-level','complex-word-zh','complex-word-note','complex-word-message','complex-word-delete','glossary-toggle','glossary-dialog','glossary-close','glossary-search','glossary-list','glossary-form','glossary-word','glossary-pos','glossary-zh','glossary-note','glossary-message','glossary-delete','glossary-backup-select','glossary-backup-create','glossary-backup-restore','glossary-backup-download','glossary-backup-delete',
+    'page-status','zoom-out','zoom-reset','zoom-in','panel-source-text','complex-word-toggle','complex-word-dialog','complex-word-close','complex-word-search','complex-word-list','complex-word-form','complex-word-word','complex-word-level','complex-word-zh','complex-word-note','complex-word-message','complex-word-delete','complex-word-info','glossary-toggle','glossary-dialog','glossary-close','glossary-search','glossary-list','glossary-form','glossary-word','glossary-pos','glossary-zh','glossary-note','glossary-message','glossary-delete','glossary-backup-select','glossary-backup-create','glossary-backup-restore','glossary-backup-download','glossary-backup-delete',
   ];
   const els = Object.fromEntries(ids.map((id) => [id, new FakeElement()]));
   for (const value of ['concise','standard','detailed']) els[`depth-${value}`].dataset.analysisDepth = value;
@@ -147,6 +147,13 @@ function loadViewer({ narrow = false, preset = null, legacyBookmarks = null } = 
         ? { ok: true, status: 200, json: async () => ({ suggestion: { word, lemma: word, zh, level: '较难', note: '自动取自本地术语表', source: 'glossary' } }) }
         : { ok: false, status: 404, json: async () => ({ error: '本地词典暂未收录该单词' }) };
     }
+    if (String(url).startsWith('/api/word-info?')) {
+      const word = decodeURIComponent(String(url).split('word=')[1] || '');
+      if (word === 'latency') {
+        return { ok: true, status: 200, json: async () => ({ info: { word, phonetic: '/ˈleɪtənsi/', pos_entries: [{ pos: 'noun', definitions: ['The time delay in a system.'], examples: ['Latency is constrained.'], synonyms: ['delay'] }], collocations: [], source: 'dictionaryapi.dev' } }) };
+      }
+      return { ok: false, status: 404, json: async () => ({ error: '在线词典暂未收录该单词' }) };
+    }
     if (url === '/api/complex-words' && options.method === 'POST') {
       const payload = JSON.parse(options.body);
       projectComplexWords[payload.word] = { zh: payload.zh, level: payload.level, note: payload.note };
@@ -185,6 +192,9 @@ test('复杂词表可维护，分析原文右击单词会自动填充释义', as
   assert.equal(els['complex-word-word'].value, 'latency');
   assert.equal(els['complex-word-zh'].value, '延迟');
   assert.match(els['complex-word-message'].textContent, /已自动填充/);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.match(els['complex-word-info'].innerHTML, /ˈleɪtənsi/);
+  assert.match(els['complex-word-info'].innerHTML, /noun/);
   els['complex-word-level'].value = '较难';
   await context.submitComplexWord({ preventDefault() {} });
   assert.equal(projectComplexWords.latency.zh, '延迟');

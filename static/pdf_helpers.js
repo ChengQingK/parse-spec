@@ -144,12 +144,88 @@
     return resolved ? resolved.pageNum : null;
   }
 
+  // 命中滚动位置所在的页：返回第一个 bottom > scrollTop + bias 的页（0-based）。
+  // tops/heights 为未缩放页面坐标，调用方自行把滚动偏移除以缩放倍率。
+  function pageIndexAtScroll(tops, heights, scrollTop, bias = 8) {
+    const count = Math.min((tops || []).length, (heights || []).length);
+    if (!count) return 0;
+    const target = (Number(scrollTop) || 0) + bias;
+    let low = 0;
+    let high = count - 1;
+    let answer = count - 1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (tops[mid] + heights[mid] > target) {
+        answer = mid;
+        high = mid - 1;
+      } else {
+        low = mid + 1;
+      }
+    }
+    return answer;
+  }
+
+  // 含 margin 的可见页区间（1-based 页码，闭区间），供页面虚拟化调度。
+  function visiblePageRange(tops, heights, scrollTop, viewHeight, margin = 0) {
+    const count = Math.min((tops || []).length, (heights || []).length);
+    if (!count) return { start: 1, end: 0 };
+    const top = (Number(scrollTop) || 0) - Math.max(0, margin);
+    const bottom = (Number(scrollTop) || 0) + (Number(viewHeight) || 0) + Math.max(0, margin);
+    const start = pageIndexAtScroll(tops, heights, Math.max(0, top), 0);
+    const end = pageIndexAtScroll(tops, heights, Math.max(0, bottom), 0);
+    return { start: start + 1, end: end + 1 };
+  }
+
+  // canvas 渲染倍率封顶：同时限制最大倍率与总像素，避免低端设备内存暴涨。
+  function fitCanvasScale(widthPt, heightPt, desiredScale, { maxScale = 3.2, maxPixels = 16e6 } = {}) {
+    const width = Number(widthPt) || 0;
+    const height = Number(heightPt) || 0;
+    let scale = Number.isFinite(Number(desiredScale)) && Number(desiredScale) > 0 ? Number(desiredScale) : 1;
+    scale = Math.min(scale, maxScale);
+    if (width > 0 && height > 0 && width * scale * (height * scale) > maxPixels) {
+      scale = Math.max(0.5, Math.sqrt(maxPixels / (width * height)));
+    }
+    return scale;
+  }
+
+  // trailing 防抖；定时器可注入，便于测试。
+  function debounce(fn, wait, timers = {}) {
+    const set = timers.setTimeout || ((callback, ms) => setTimeout(callback, ms));
+    const clear = timers.clearTimeout || ((id) => clearTimeout(id));
+    let timer = 0;
+    return function debounced(...args) {
+      if (timer) clear(timer);
+      timer = set(() => {
+        timer = 0;
+        fn.apply(this, args);
+      }, wait);
+    };
+  }
+
+  // 行级回退矩形（从 viewer 内联逻辑提取的纯函数），虚拟化挂载时先用它兜底命中。
+  function computeFallbackRects(sentence, rowTolerance, pageWidth, pageHeight) {
+    const width = Number(pageWidth) || 0;
+    const height = Number(pageHeight) || 0;
+    return buildSentenceLineRects(sentence, rowTolerance).map((rect) => {
+      const left = Math.max(0, Math.min(width, rect.left));
+      const top = Math.max(0, Math.min(height, rect.top));
+      const right = Math.max(left, Math.min(width, rect.left + rect.width));
+      const bottom = Math.max(top, Math.min(height, rect.top + rect.height));
+      return { left, top, width: right - left, height: bottom - top };
+    }).filter((rect) => rect.width > 0 && rect.height > 0);
+  }
+
   global.__parseSpecPdfHelpers = {
     buildSentenceDomRects,
     buildSentenceLineRects,
+    computeFallbackRects,
+    debounce,
+    fitCanvasScale,
     mergeNearbyRects,
+    pageIndexAtScroll,
     resolveOutlinePage,
     resolvePdfDestination,
     targetAtPoint,
+    visiblePageRange,
   };
 }(globalThis));

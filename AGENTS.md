@@ -1,14 +1,14 @@
 # AGENTS.md
 
-这里是 **parse-spec** —— 一个**本地离线**的英文长难句解析工具：前端用 pdf.js 渲染 SPEC PDF，悬停预览句子范围，单击后调用后端构建逻辑分句树并在持久侧边栏展示。所有注释与 UI 均为中文。
+这里是 **parse-spec** —— 一个英文长难句解析工具：前端用 pdf.js 渲染 SPEC PDF，悬停预览句子范围，单击后调用后端构建逻辑分句树并在持久侧边栏展示。解析、术语与整句翻译**全程本地离线**；唯一例外是右击单词的词典详情（`/api/word-info`）会联网查询在线免费词典，带磁盘缓存与离线降级。所有注释与 UI 均为中文。
 
 ## 运行命令
 
-- 启动服务：`python server.py` → 默认 http://127.0.0.1:5197（Flask，仅绑定本地）；端口不可绑定时自动回退到 5800 等备用端口，以终端打印地址为准。
-- 生成示例 PDF：`python make_sample.py` → 生成 `docs/sample_spec.pdf`
+- 启动服务：`python server.py` → 默认 http://127.0.0.1:5197（Flask，仅绑定本地）；端口不可绑定时自动回退到 5800 等备用端口，以终端打印地址为准。指定端口用环境变量，如 `$env:PARSE_SPEC_PORT=6800`。
+- 生成示例 PDF：`python make_sample.py` → 生成 `docs/sample_spec.pdf`；`docs/DDR_PHY_Interface_Specification_v5_2.pdf` 是真实 DFI 回归样本，用于验证目录 Link 注解、复杂文本层和长句解析。
 - 初始化环境：`uv venv --python 3.11 .venv`，然后 `uv pip install --python .venv\Scripts\python.exe -r requirements.txt .\vendor\en_core_web_sm-3.8.0-py3-none-any.whl`
 - `server.py` 在直接运行且当前解释器缺 Flask 时，会自动切换到已有的项目 `.venv`；没有 `.venv` 则打印上述安装命令。
-- 完整自测：`.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v`、`npm test`
+- 完整自测：`.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v`、`npm test`（首次运行前端测试前先 `npm ci` 安装 devDependencies）
 - 模块冒烟：`python -m parse.clauser`、`python -m parse.glossary`
 - 环境：Python 3.11；前端测试要求 Node.js ≥22.13。
 - 前端无构建步骤：`pdfjs-dist@6.2.108` 的模块版运行文件已 vendor 到 `static/pdf.min.mjs` 与 `static/pdf.worker.min.mjs`。升级后运行 `npm run sync:pdfjs`；`npm test` 会先做哈希一致性校验。
@@ -41,9 +41,14 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 
 ## 前端实现要点（`static/viewer.js` + `static/style.css`，2026-08 更新）
 
-### 渲染：canvas + 透明文本层 + Link 注解层 + 字符标记层
+### 渲染：两阶段管线 + 页面虚拟化（2026-08-27 重构）
 
-- `static/app.js` 依次加载模块版 PDF.js、`pdf_helpers.js` 和 `viewer.js`；`renderPage` 使用 PDF.js 6 的 `TextLayer` 类生成透明文本层。
+- **解析阶段**（`parsePage`，严格页序、可取消）：每页只取 `textContent` → 断句 → `createPageTargets` 并登记 `pageSentenceTargets`，创建定尺寸占位 `.page-wrap`；不做任何视觉渲染。跨页合并依赖页序，必须保持。
+- **渲染阶段**（`mountPageVisual`/`unmountPage`）：`IntersectionObserver`（rootMargin 1600px，120ms 沉降）按需挂载 canvas/textLayer/注解层，最多同时挂载 8 页（LRU + 距当前页距离回收），canvas 光栅化并发上限 2。无 IO 的环境（含 Node 测试）回退为全量顺序渲染。
+- canvas 位图按 `fitCanvasScale(S × devicePixelRatio × pdfZoom)`（封顶 3.2 倍/1600 万像素）渲染；CSS `zoom` 布局体系不变，缩放提交后仅重渲已挂载页的位图（`rerenderMountedCanvases`），高倍缩放不再模糊。
+- 高亮 rect **懒计算**：挂载时只用行级回退矩形（`computeFallbackRects` 纯坐标），字符级精确矩形由 `scheduleExactRectsWarmup`（requestIdleCallback/60ms 回退）升级并重建 mark 层；悬停命中 leading 同步 + rAF trailing 合并；`toggleSentenceMarks` 走 `markElementsByKey` 引用缓存，不再全文档 `querySelectorAll`。
+- 页码统计用缓存的未缩放 `pageTops/pageHeights` 数组 + `pageIndexAtScroll` 二分；术语/复杂词搜索 150ms 防抖；词典保存按词失效 `sentenceResults`。
+- `static/app.js` 并行拉取 `pdf.min.mjs` 与 `pdf_helpers.js`（执行顺序不变），`index.html` 有 modulepreload；静态响应带 `Cache-Control: max-age=86400`；`mountPageVisual` 使用 PDF.js 6 的 `TextLayer` 类生成透明文本层。
 - 文本层保留原生文本选择/复制；必须保留 PDF.js 6 的 `--total-scale-factor/--text-scale-factor/--font-height/--scale-x` CSS，缺失会导致透明文字宽度和高亮越过页面右侧。
 - `.sentence-mark-layer` 使用每个 TextItem 内的字符偏移和 DOM `Range.getClientRects()` 绘制真实字形范围，坐标估算只作为损坏文本层的回退。
 - 每页还会读取 Link annotation，生成只支持内部目标、安全 named action 和 HTTP(S) 的 `.annotation-layer`；不得执行 PDF JavaScript。
@@ -87,7 +92,14 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 
 ## API 契约（POST `/api/analyze`）
 
-请求：
+`server.py` 还暴露以下端点（均仅本地、带输入限制、安全响应头和原子 JSON 写入）：
+
+- `/api/glossary`：术语表 GET/POST/DELETE，及 `/api/glossary/backups`（备份列表/创建/读取/删除）和 `/api/glossary/restore`（恢复）。
+- `/api/complex-words`：复杂词表 GET/POST/DELETE，及 `/api/complex-words/suggest`（添加时按复杂词表→术语表→本地翻译词典顺序建议释义）。
+- `/api/bookmarks`：书签 GET/POST，统一持久化到根目录 `bookmarks.json`。
+- `/api/word-info`：在线词典详情（音标/词性/英文释义/例句/同义词/搭配），由 `parse/online_dict.py` 经 dictionaryapi.dev 查询，2.5s 超时、内存+`word_cache.json` 磁盘正负缓存（命中永久有效、未收录 24h、网络错误 1h TTL）；失败返回 404，前端回退为仅显示本地释义。整句翻译路径不经过此端点。
+
+`POST /api/analyze` 请求：
 ```json
 { "sentences": ["sentence 1", "..."] }
 ```
@@ -119,10 +131,12 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - `glossary.json` 位于项目根目录，格式 `{ "word": { "pos": ..., "zh": ..., "note": ... } }`；用户词条优先于 `BUILTIN`，保存后下一次请求自动重载。
 - spaCy 路径用 tokenizer 与 lemma 抽取术语；规则降级路径仍依赖正则候选和 `Glossary.lookup` 的轻量后缀还原。
 - 跨页合并是保守启发式：下一页以专有名词或大写缩写续接时可能只给出“疑似截断”提示；表格和 PDF 自身错误阅读顺序仍可能误切。
-- 页面仍会顺序完整渲染；每页间会让出事件循环且新文件会取消旧任务，但超大 PDF 尚未实现可见页虚拟化。
+- `/api/word-info` 依赖 dictionaryapi.dev：无网络或未收录时详情区显示“在线详情不可用”，中文释义始终来自本地词表，不受网络影响；`word_cache.json` 是运行期缓存，不提交 Git。
+- 页面虚拟化以占位高度估算滚动位置，极端变高页的滚动锚点在挂载/卸载瞬间可能有轻微偏移；`page.cleanup()` 后重渲依赖 pdf.js 重新解析，超大页重渲仍有成本。
 
 ## 变更记录（2026-08）
 
+- 2026-08-27：性能与词典增强——渲染改为两阶段管线（解析占位 + IO 驱动可见页虚拟化，LRU 8 页、光栅并发 2）；高亮 rect 懒计算 + 悬停 rAF 节流 + mark 引用缓存；缩放提交按 DPR 重渲可见页位图；页码二分统计；搜索防抖；缓存按词失效；modulepreload + 静态 Cache-Control。新增 `/api/word-info`（`parse/online_dict.py`）：右击单词在复杂词弹层展示音标/词性/英文释义/例句/同义词/搭配，dictionaryapi.dev + 磁盘正负缓存 + 离线降级；中文释义仍全部来自本地词表。
 - 2026-08-23：全面优化——PDF.js 由存在安全公告的 2.x 升级到 6.2.108 模块版并加入同步/哈希校验；修复连续打开 PDF 的竞态和单 span 多句无法命中；目录由猴子补丁改为显式模块；增加跨页保守合并、多栏原始阅读顺序、词典热重载、lemma 术语、解析异常可观测性、请求体上限与安全响应头；同步中文 UI、文档和回归测试。
 - 2026-08-20：新增主题、三档解析密度、分析栏五种位置、完整句子坐标标记和 PDF 目录导航。
 - 2026-08-20：从内容悬浮窗重构为持久分析侧栏——悬停仅预览、单击解析并锁定；新增可拖动右栏/窄屏底部抽屉、逻辑分句树、逐分句 grammar、精确字符 segments、API schema v2、规则同构降级和对应回归测试。旧 tooltip 交互已删除。
@@ -151,14 +165,14 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - **跨页规则偏保守**：能处理小写续接和跨页断词，但下一页以专有名词/大写缩写续接时不会自动合并，只会提示疑似截断。
 - **模型边界**：`en_core_web_sm` 对高度歧义或省略结构仍可能误标；`confidence` 是启发式等级，不是统计校准值。
 - **翻译边界**：当前是术语表和语法规则驱动的结构辅助译文；复杂修辞和领域外词汇可能保留英文。
-- **超大文档性能**：新文件可取消旧加载、每页间会让出事件循环，但 canvas 与文本层仍会完整保留，尚未做可见页虚拟化。
+- **超大文档性能**：已做可见页虚拟化（最多挂载 8 页）；更极端的千页文档仍可进一步优化占位与解析吞吐。
 - **解析超时**：spaCy 超长句仍是 CPU 密集任务，目前只有输入长度/请求体限制，没有进程级硬超时。
 - **真实浏览器自动化**：本轮已人工完成真实浏览器冒烟，但仓库测试仍以 Node 模拟 DOM 为主，尚未引入 Playwright 端到端套件。
 
 ### 建议的改进方向（按优先级）
 
 1. **真实浏览器回归**：加入 Playwright 端到端测试，覆盖文件选择、复制、坐标点击、目录、侧栏拖动和窄屏布局。
-2. **超大 PDF 虚拟化**：只保留可见页附近的 canvas/textLayer，跨页文本状态与视觉渲染生命周期分离。
+2. ~~超大 PDF 虚拟化~~（2026-08-27 已完成：可见页挂载 + LRU 回收 + 懒 rect）。
 3. **解析隔离与超时**：把 spaCy 调用放入可取消的工作进程，为超长句提供明确降级提示。
 4. **复杂版面语料**：补真实多栏、表格、页眉页脚和跨页大写续接 PDF，用样本驱动而非继续堆叠无数据启发式。
 5. **翻译模型扩展**：在现有 `structured-local` 适配器之后增加可选本地小模型，同时保留术语、否定、情态和数值一致性校验。

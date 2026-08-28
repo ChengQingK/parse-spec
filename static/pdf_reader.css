@@ -124,7 +124,7 @@
 .bookmark-jump small { margin-top: 3px; color: var(--muted); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bookmark-rename,.bookmark-remove { align-self: center; border: 0; border-radius: 7px; padding: 6px 8px; background: transparent; color: var(--muted); cursor: pointer; }
 .bookmark-rename:hover { background: var(--accent-soft); color: var(--accent-strong); }
-.bookmark-remove:hover { background: #feecec; color: #b42318; }
+.bookmark-remove:hover { background: var(--danger-soft, #feecec); color: var(--danger); }
 
 /* 可搜索、可维护的本地术语表。 */
 .glossary-dialog { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(15,23,42,.42); }
@@ -146,16 +146,29 @@
 .glossary-form > div:first-child,.glossary-field-zh,.glossary-field-note,.glossary-backups,.glossary-message,.glossary-form-actions { grid-column: 1 / -1; }
 .glossary-form label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 700; }
 .glossary-message { min-height: 20px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.glossary-message.is-error { color: #b42318; }
+.glossary-message.is-error { color: var(--danger); }
 .glossary-backups { display: grid; gap: 8px; padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--ui-soft, #fafbfc); }
 .glossary-backups > div:first-child { display: grid; gap: 6px; }
 .glossary-backups select { width: 100%; min-width: 0; padding: 8px 9px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); color: var(--ink); font: inherit; font-size: 11.5px; }
 .glossary-backup-actions { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 7px; }
+.word-info { grid-column: 1 / -1; display: grid; gap: 9px; padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--ui-soft, #fafbfc); font-size: 12.5px; line-height: 1.55; }
+.word-info-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.word-info-phonetic { color: var(--muted); }
+.word-info-source { margin-left: auto; color: var(--muted); font-size: 10px; }
+.word-info-pos { display: grid; gap: 4px; }
+.word-info-pos-tag { display: inline-flex; width: fit-content; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-strong); font-size: 10px; font-weight: 700; }
+.word-info-defs { margin: 0; padding-left: 18px; }
+.word-info-example { color: var(--muted); }
+.word-info-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.word-info-label { color: var(--muted); font-size: 11px; font-weight: 700; }
+.word-info-chip { padding: 1px 7px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); font-size: 11px; }
+.word-info-empty { color: var(--muted); }
+.word-info-actions { display: flex; justify-content: flex-end; }
 .glossary-backup-actions button { width: auto; margin: 0; padding: 6px 7px; font-size: 11px; }
 .glossary-backups small { color: var(--muted); line-height: 1.45; }
 .glossary-form-actions { position: sticky; bottom: -18px; z-index: 2; display: grid; grid-template-columns: minmax(0,.8fr) minmax(0,1.2fr); gap: 9px; padding: 10px 0 2px; background: var(--panel); }
 .glossary-form-actions .secondary-action,.glossary-form-actions .btn { width: 100%; margin: 0; }
-.danger-action { color: #b42318; }
+.danger-action { color: var(--danger); }
 .danger-action:hover:not(:disabled) { background: #feecec; }
 .danger-action:disabled { opacity: .45; cursor: not-allowed; }
 .complex-word-shell { height: min(700px, calc(100vh - 32px)); }

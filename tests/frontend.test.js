@@ -333,6 +333,18 @@ test("多栏文本优先遵循 PDF 的原始阅读顺序", () => {
 });
 
 
+test("句子命中矩形懒计算：挂载用行级回退，精确矩形待空闲升级", () => {
+  const { context } = loadViewer();
+  const layer = new FakeElement();
+  const wrap = new FakeElement();
+  const words = [{ text: "The data is sampled.", x0: 0, y0: 10, x1: 100, y1: 20 }];
+  const targets = context.wireTextLayer(layer, wrap, [words], words, 1);
+  assert.equal(targets.length, 1);
+  assert.ok(targets[0].rects.length > 0);
+  assert.ok(targets[0].rects[0].top >= 0);
+  assert.equal(targets[0].rects[0].left >= 0, true);
+});
+
 test("悬停只预览，单击才请求并锁定", () => {
   let fetchCount = 0;
   const { context, elements } = loadViewer(() => {
@@ -449,4 +461,32 @@ test("较早的异步响应不能覆盖新选句", async () => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.match(elements["analysis-content"].innerHTML, /Second page sentence/);
   assert.doesNotMatch(elements["analysis-content"].innerHTML, /First page sentence/);
+});
+
+
+test("无 IntersectionObserver 的回退路径不受挂载上限回收影响", () => {
+  const { context } = loadViewer();
+  const hook = context.__parseSpecViewerTest;
+  assert.equal(hook.hasPageObserver, false);  // 测试环境无 IO，走回退路径
+  hook.setMountedPages([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  hook.setVisibleSlots([1, 2, 3]);
+  hook.enforceMountedPageLimit();
+  // 回退路径必须保留全部已挂载页，否则第 9 页起永久空白
+  assert.equal(hook.mountedPageCount, 12);
+});
+
+
+test("有 IntersectionObserver 时按距离回收最远页", () => {
+  const { context } = loadViewer();
+  const hook = context.__parseSpecViewerTest;
+  hook.setPageObserver({ observe() {}, unobserve() {}, disconnect() {} });
+  hook.setMountedPages([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  hook.setVisibleSlots([5, 6, 7]);
+  hook.enforceMountedPageLimit();
+  // 上限 8 页：可见页 5/6/7 必须保留，最远的页 12 被回收
+  assert.ok(hook.mountedPageCount <= 8);
+  assert.ok(hook.mountedPageNums.includes(5));
+  assert.ok(hook.mountedPageNums.includes(6));
+  assert.ok(hook.mountedPageNums.includes(7));
+  assert.ok(!hook.mountedPageNums.includes(12));
 });

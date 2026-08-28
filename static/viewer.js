@@ -7,12 +7,23 @@ if (!pdfHelpers) throw new Error("PDF 阅读辅助模块尚未加载");
 const {
   buildSentenceDomRects,
   buildSentenceLineRects,
+  computeFallbackRects,
+  debounce,
+  fitCanvasScale,
+  pageIndexAtScroll,
   resolvePdfDestination,
   targetAtPoint,
 } = pdfHelpers;
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdf.worker.min.mjs";
 
 const S = 1.4;
+const PAGE_GAP_PX = 20;              // 与 style.css #pages 的 gap 保持一致
+const MOUNTED_PAGE_LIMIT = 8;        // 页面虚拟化：最多同时挂载的页数
+const MOUNT_SETTLE_MS = 120;         // 进入视距后的挂载沉降，过滤快速掠过
+const MAX_CONCURRENT_RENDERS = 2;    // canvas 光栅化并发闸门
+const CANVAS_MAX_SCALE = 3.2;
+const CANVAS_MAX_PIXELS = 16_000_000;
+const SEARCH_DEBOUNCE_MS = 150;
 const fileInput = document.getElementById("file");
 const emptyFileInput = document.getElementById("file-empty");
 const pagesEl = document.getElementById("pages");
@@ -55,6 +66,7 @@ const complexWordZh = document.getElementById("complex-word-zh");
 const complexWordNote = document.getElementById("complex-word-note");
 const complexWordMessage = document.getElementById("complex-word-message");
 const complexWordDelete = document.getElementById("complex-word-delete");
+const complexWordInfo = document.getElementById("complex-word-info");
 const glossaryToggle = document.getElementById("glossary-toggle");
 const glossaryDialog = document.getElementById("glossary-dialog");
 const glossaryClose = document.getElementById("glossary-close");
@@ -90,6 +102,21 @@ const THEME_LABELS = Object.freeze({ light: "浅色", dark: "暗色", eye: "护�
 const THEME_ICONS = Object.freeze({ light: "☀", dark: "☾", eye: "◐" });
 const sentenceResults = new Map();
 const pageSentenceTargets = new Map();
+const renderComplexWordEntriesDebounced = debounce((value) => renderComplexWordEntries(value), SEARCH_DEBOUNCE_MS);
+const renderGlossaryEntriesDebounced = debounce((value) => renderGlossaryEntries(value), SEARCH_DEBOUNCE_MS);
+
+/* 单词级缓存失效：词典变更只让包含该词的分析缓存过期，不再全表清空。 */
+function invalidateSentenceResultsFor(word) {
+  const needle = String(word || "").trim().toLowerCase();
+  if (!needle) {
+    sentenceResults.clear();
+    return;
+  }
+  const pattern = new RegExp(`\\b${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+  for (const key of [...sentenceResults.keys()]) {
+    if (pattern.test(key)) sentenceResults.delete(key);
+  }
+}
 const recentDocuments = [];
 
 let currentPdf = null;
@@ -111,12 +138,25 @@ let activeGlossarySource = null;
 let complexWordEntries = [];
 let activeComplexWordSource = null;
 let complexWordSuggestionSerial = 0;
+let wordInfoSerial = 0;
 let activeRecentDocumentKey = null;
 let pdfZoom = 1;
 let committedPdfZoom = 1;
 let zoomCommitTimer = 0;
 let pageStatusFrame = 0;
 let uiSettings = loadSettings();
+
+/* 页面虚拟化状态：解析阶段只建占位与句子数据，视觉渲染按需挂载/回收。 */
+let pageTops = [];
+let pageHeights = [];
+const pageDataByNum = new Map();
+const mountedPages = new Map();
+const visibleSlots = new Set();
+const mountTimers = new Map();
+const markElementsByKey = new Map();
+let pageObserver = null;
+let activeRenders = 0;
+const renderQueue = [];
 
 /* ---------------- 界面状态 ---------------- */
 
@@ -196,6 +236,7 @@ function commitPdfZoom(persist = true) {
   if (persist) {
     try { if (window.localStorage) window.localStorage.setItem(PDF_ZOOM_KEY, String(pdfZoom)); } catch (_ignored) {}
   }
+  if (currentPdf) rerenderMountedCanvases();
   schedulePageStatusUpdate();
 }
 
@@ -422,7 +463,38 @@ function toWords(items, viewport, scale) {
 
 /* ---------------- PDF 页面 ---------------- */
 
-async function renderPage(pdf, pageNum, container, documentSentenceState = null) {
+function devicePixelRatioSafe() {
+  return Math.max(1, Math.min(3, Number(window.devicePixelRatio) || 1));
+}
+
+function renderScaleFor(viewport) {
+  return fitCanvasScale(
+    viewport.width / S,
+    viewport.height / S,
+    S * devicePixelRatioSafe() * pdfZoom,
+    { maxScale: CANVAS_MAX_SCALE, maxPixels: CANVAS_MAX_PIXELS },
+  );
+}
+
+function acquireRenderSlot() {
+  if (activeRenders < MAX_CONCURRENT_RENDERS) {
+    activeRenders += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => renderQueue.push(resolve));
+}
+
+function releaseRenderSlot() {
+  activeRenders = Math.max(0, activeRenders - 1);
+  const next = renderQueue.shift();
+  if (next) {
+    activeRenders += 1;
+    next();
+  }
+}
+
+/* 解析阶段：只取文本与建句子数据，创建定尺寸占位，不做任何视觉渲染。 */
+async function parsePage(pdf, pageNum, container, documentSentenceState, loadId) {
   const page = await pdf.getPage(pageNum);
   const viewport = page.getViewport({ scale: S });
   const wrap = document.createElement("div");
@@ -430,41 +502,239 @@ async function renderPage(pdf, pageNum, container, documentSentenceState = null)
   wrap.dataset.pageNumber = String(pageNum);
   wrap.__pdfViewport = viewport;
   wrap.style.setProperty("--scale-factor", String(Number(viewport.scale || S)));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.floor(viewport.width);
-  canvas.height = Math.floor(viewport.height);
-  wrap.appendChild(canvas);
+  wrap.style.width = `${Math.floor(viewport.width)}px`;
+  wrap.style.height = `${Math.floor(viewport.height)}px`;
   container.appendChild(wrap);
-
-  await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
   const textContent = await page.getTextContent();
+  if (loadId !== documentLoadSerial || pdf !== currentPdf) return null;
   const words = toWords(textContent.items, viewport, S);
   const sentences = buildSentences(words);
-  const sentenceTargets = documentSentenceState
-    ? createPageTargets(sentences, pageNum, documentSentenceState)
-    : null;
+  const sentenceTargets = createPageTargets(sentences, pageNum, documentSentenceState);
+  sentenceTargets.forEach((target, sentenceIndex) => {
+    pageSentenceTargets.set(`${pageNum}:${sentenceIndex}`, target);
+  });
+  pageDataByNum.set(pageNum, { page, viewport, textContent, words, sentences, targets: sentenceTargets, wrap });
+  pageHeights[pageNum - 1] = Math.floor(viewport.height);  // 与占位取整一致，避免页码坐标漂移
+  pageTops[pageNum - 1] = pageNum > 1
+    ? (pageTops[pageNum - 2] || 0) + (pageHeights[pageNum - 2] || 0) + PAGE_GAP_PX
+    : 0;
+  if (pageObserver) pageObserver.observe(wrap);
+  else await mountPageVisual(pageNum, loadId);  // 无 IntersectionObserver 的环境回退为全量渲染
+  return wrap;
+}
 
-  const textLayer = document.createElement("div");
-  textLayer.className = "textLayer";
-  textLayer.style.width = `${canvas.width}px`;
-  textLayer.style.height = `${canvas.height}px`;
-  wrap.appendChild(textLayer);
-  let textDivs = [];
-  if (typeof pdfjsLib.TextLayer === "function") {
-    const textLayerTask = new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport });
-    await textLayerTask.render();
-    textDivs = textLayerTask.textDivs || [];
-  } else {
-    textDivs = [];
-    await pdfjsLib.renderTextLayer({ textContent, container: textLayer, viewport, textDivs }).promise;
+function sizeCanvasToViewport(canvas, viewport) {
+  const scale = renderScaleFor(viewport);
+  canvas.width = Math.max(1, Math.floor((viewport.width / S) * scale));
+  canvas.height = Math.max(1, Math.floor((viewport.height / S) * scale));
+  canvas.style.width = `${Math.floor(viewport.width)}px`;
+  canvas.style.height = `${Math.floor(viewport.height)}px`;
+  return scale;
+}
+
+/* 单个挂载页的位图渲染：先取消在途渲染并等其落定，杜绝同 canvas 并发 render；
+   拿到渲染槽后复查状态，任何路径都保证释放槽位。 */
+async function renderMountCanvas(mount) {
+  const serial = ++mount.renderSerial;
+  const data = pageDataByNum.get(mount.pageNum);
+  if (!data || !mount.canvas) return;
+  if (mount.renderTask && typeof mount.renderTask.cancel === "function") {
+    try { mount.renderTask.cancel(); } catch (_ignored) {}
+    try { await mount.renderTask.promise; } catch (_ignored) {}
   }
-  textLayer.style.visibility = "visible";
-  const alignedTextDivs = alignTextDivs(textContent.items, textDivs);
-  wireTextLayer(textLayer, wrap, sentences, words, pageNum, alignedTextDivs, sentenceTargets, viewport.width, viewport.height);
-  await renderAnnotationLayer(page, viewport, wrap, pdf);
-  if (typeof page.cleanup === "function") page.cleanup();
-  console.log(`P${pageNum}: ${words.length} 词, ${sentences.length} 句`);
+  if (serial !== mount.renderSerial || mount.stage === "unmounted" || mount.loadId !== documentLoadSerial) return;
+  const scale = sizeCanvasToViewport(mount.canvas, data.viewport);
+  await acquireRenderSlot();
+  try {
+    if (serial !== mount.renderSerial || mount.stage === "unmounted" || mount.loadId !== documentLoadSerial) return;
+    mount.renderTask = data.page.render({ canvasContext: mount.canvas.getContext("2d"), viewport: data.page.getViewport({ scale }) });
+    await mount.renderTask.promise;
+  } catch (error) {
+    if (mount.stage !== "unmounted" && mount.loadId === documentLoadSerial && String(error && error.name) !== "RenderingCancelledException") {
+      console.warn(`第 ${mount.pageNum} 页位图渲染失败`, error);
+    }
+  } finally {
+    releaseRenderSlot();
+  }
+}
+
+/* 渲染阶段：挂载 canvas/textLayer/注解层并接线交互，可取消、受挂载上限约束。 */
+async function mountPageVisual(pageNum, loadId = documentLoadSerial) {
+  if (mountedPages.has(pageNum)) return mountedPages.get(pageNum).ready;
+  const data = pageDataByNum.get(pageNum);
+  if (!data || loadId !== documentLoadSerial || !currentPdf) return null;
+  const mount = {
+    pageNum,
+    loadId,
+    stage: "mounting",
+    zoomAtMount: pdfZoom,
+    canvas: null,
+    renderTask: null,
+    renderSerial: 0,
+    targets: null,
+    alignedTextDivs: [],
+    ready: null,
+  };
+  mountedPages.set(pageNum, mount);
+  mount.ready = (async () => {
+    try {
+      const { page, viewport, textContent, words, sentences, targets, wrap } = data;
+      const canvas = document.createElement("canvas");
+      wrap.appendChild(canvas);
+      mount.canvas = canvas;
+      await renderMountCanvas(mount);
+      if (loadId !== documentLoadSerial || mount.stage === "unmounted") return;
+
+      const textLayer = document.createElement("div");
+      textLayer.className = "textLayer";
+      textLayer.style.width = `${Math.floor(viewport.width)}px`;
+      textLayer.style.height = `${Math.floor(viewport.height)}px`;
+      wrap.appendChild(textLayer);
+      let textDivs = [];
+      if (typeof pdfjsLib.TextLayer === "function") {
+        const textLayerTask = new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport });
+        await textLayerTask.render();
+        textDivs = textLayerTask.textDivs || [];
+      } else {
+        textDivs = [];
+        await pdfjsLib.renderTextLayer({ textContent, container: textLayer, viewport, textDivs }).promise;
+      }
+      textLayer.style.visibility = "visible";
+      if (loadId !== documentLoadSerial || mount.stage === "unmounted") return;
+      mount.alignedTextDivs = alignTextDivs(textContent.items, textDivs);
+      mount.targets = wireTextLayer(textLayer, wrap, sentences, words, pageNum, mount.alignedTextDivs, targets, viewport.width, viewport.height);
+      await renderAnnotationLayer(page, viewport, wrap, currentPdf);
+      if (typeof page.cleanup === "function") page.cleanup();
+      mount.stage = "mounted";
+      // 重新挂载的页需要恢复选中/预览高亮
+      if (selectedTarget && (selectedTarget.locations || []).some((location) => location.pageNum === pageNum)) {
+        addClassToSpans(selectedTarget, "is-selected");
+      }
+      if (previewTarget && (previewTarget.locations || []).some((location) => location.pageNum === pageNum)) {
+        addClassToSpans(previewTarget, "is-preview");
+      }
+      // 挂载期间发生过缩放提交：位图按新倍率补渲一次
+      if (mount.zoomAtMount !== pdfZoom) await renderMountCanvas(mount);
+      scheduleExactRectsWarmup(mount);
+      enforceMountedPageLimit();
+    } catch (error) {
+      // 失败页移出挂载表，允许再次进入视距时重试
+      if (mount.stage !== "unmounted") mountedPages.delete(pageNum);
+      if (mount.stage !== "unmounted" && loadId === documentLoadSerial) {
+        console.warn(`第 ${pageNum} 页渲染失败`, error);
+      }
+    }
+  })();
+  return mount.ready;
+}
+
+function unmountPage(pageNum) {
+  const mount = mountedPages.get(pageNum);
+  if (!mount) return;
+  mount.stage = "unmounted";
+  mountedPages.delete(pageNum);
+  if (mount.renderTask && typeof mount.renderTask.cancel === "function") {
+    try { mount.renderTask.cancel(); } catch (_ignored) {}
+  }
+  const data = pageDataByNum.get(pageNum);
+  if (data && data.wrap) data.wrap.innerHTML = "";  // 占位尺寸由 inline style 保留，无需重设
+  for (const key of [...markElementsByKey.keys()]) {
+    if (Number(key.split(":")[0]) === pageNum) markElementsByKey.delete(key);
+  }
+  // 丢弃已脱离 DOM 的 span 引用，重新挂载时由 wireTextLayer 重建
+  for (const target of (data && data.targets) || []) {
+    target.spans = (target.spans || []).filter((span) => span && span.isConnected !== false);
+  }
+}
+
+function ensurePageObserver() {
+  if (pageObserver || typeof IntersectionObserver !== "function") return pageObserver;
+  pageObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const pageNum = Number(entry.target.dataset && entry.target.dataset.pageNumber) || 0;
+      if (!pageNum) continue;
+      if (entry.isIntersecting) {
+        visibleSlots.add(pageNum);
+        scheduleMount(pageNum);
+      } else {
+        visibleSlots.delete(pageNum);
+        enforceMountedPageLimit();
+      }
+    }
+  }, { root: documentPane || null, rootMargin: "1600px 0px", threshold: 0 });
+  return pageObserver;
+}
+
+function scheduleMount(pageNum) {
+  if (mountedPages.has(pageNum) || mountTimers.has(pageNum)) return;
+  const timer = setTimeout(() => {
+    mountTimers.delete(pageNum);
+    if (visibleSlots.has(pageNum)) mountPageVisual(pageNum);
+  }, MOUNT_SETTLE_MS);
+  mountTimers.set(pageNum, timer);
+}
+
+function enforceMountedPageLimit() {
+  if (!pageObserver) return;  // 无 IO 的回退路径必须保留全部已挂载页
+  if (mountedPages.size <= MOUNTED_PAGE_LIMIT) return;
+  const current = currentVisiblePage();
+  // mountedPages 保持插入序；稳定排序下平局即挂载先后
+  const candidates = [...mountedPages.values()]
+    .filter((mount) => !visibleSlots.has(mount.pageNum))
+    .sort((a, b) => Math.abs(b.pageNum - current) - Math.abs(a.pageNum - current));
+  for (const mount of candidates) {
+    if (mountedPages.size <= MOUNTED_PAGE_LIMIT) break;
+    unmountPage(mount.pageNum);
+  }
+}
+
+/* 高亮 rect 懒计算：挂载时先用行级回退矩形，空闲时再升级为字符级精确矩形。 */
+function computeExactRectsForMount(mount) {
+  const data = pageDataByNum.get(mount.pageNum);
+  if (!data || !mount.targets || !mount.alignedTextDivs.length) return false;
+  const wrapRect = measuredRect(data.wrap, data.viewport.width, data.viewport.height);
+  const width = data.viewport.width;
+  const height = data.viewport.height;
+  const visualScale = wrapRect.width > 0 ? wrapRect.width / width : pdfZoom;
+  let upgraded = false;
+  mount.targets.forEach((target, sentenceIndex) => {
+    const exact = buildSentenceDomRects(data.sentences[sentenceIndex], mount.alignedTextDivs, wrapRect, width, height, null, visualScale);
+    if (exact.length) {
+      target.rects = exact;
+      upgraded = true;
+    }
+  });
+  return upgraded;
+}
+
+function restoreHighlightsOnPage(pageNum) {
+  if (selectedTarget && (selectedTarget.locations || []).some((location) => location.pageNum === pageNum)) {
+    toggleSentenceMarks(selectedTarget, "is-selected", true);
+  }
+  if (previewTarget && (previewTarget.locations || []).some((location) => location.pageNum === pageNum)) {
+    toggleSentenceMarks(previewTarget, "is-preview", true);
+  }
+}
+
+function scheduleExactRectsWarmup(mount) {
+  const idle = (window && typeof window.requestIdleCallback === "function")
+    ? (callback) => window.requestIdleCallback(callback, { timeout: 800 })
+    : (callback) => setTimeout(callback, 60);
+  idle(() => {
+    if (mount.stage !== "mounted" || mount.loadId !== documentLoadSerial) return;
+    const data = pageDataByNum.get(mount.pageNum);
+    if (data && computeExactRectsForMount(mount)) {
+      createSentenceMarks(data.wrap, mount.targets);
+      restoreHighlightsOnPage(mount.pageNum);  // mark 层整体重建后恢复选中/预览高亮
+    }
+  });
+}
+
+/* 缩放提交后按新倍率重渲已挂载页的 canvas 位图（textLayer/mark 层由 CSS zoom 缩放，无需重建）。 */
+function rerenderMountedCanvases() {
+  for (const mount of mountedPages.values()) {
+    if (mount.stage === "mounted") void renderMountCanvas(mount);
+  }
 }
 
 function alignTextDivs(items, textDivs) {
@@ -513,15 +783,8 @@ function annotationRect(viewport, rect) {
 }
 
 function handleNamedAction(action) {
-  if (!currentPdf || !action) return false;
-  const pageElements = document.querySelectorAll ? Array.from(document.querySelectorAll(".page-wrap[data-page-number]")) : [];
-  if (!pageElements.length) return false;
-  const paneTop = documentPane && documentPane.getBoundingClientRect ? documentPane.getBoundingClientRect().top : 0;
-  let currentIndex = pageElements.findIndex((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.bottom > paneTop + 8;
-  });
-  if (currentIndex < 0) currentIndex = pageElements.length - 1;
+  if (!currentPdf || !action || !pageTops.length) return false;
+  const currentIndex = currentVisiblePage() - 1;
   const named = String(action);
   const target = named === "FirstPage" ? 1
     : named === "LastPage" ? currentPdf.numPages
@@ -585,10 +848,15 @@ function yieldToBrowser() {
 function createSentenceMarks(wrap, targets) {
   const oldLayer = wrap.querySelector && wrap.querySelector(".sentence-mark-layer");
   if (oldLayer && oldLayer.remove) oldLayer.remove();
+  // 该页的 mark 引用全部重建，先清掉旧缓存
+  for (const target of targets || []) {
+    markElementsByKey.delete(`${target.pageNum}:${target.sentenceIndex}`);
+  }
   const layer = document.createElement("div");
   layer.className = "sentence-mark-layer";
   layer.setAttribute("aria-hidden", "true");
   for (const target of targets) {
+    const marks = [];
     for (const rect of target.rects) {
       const mark = document.createElement("span");
       mark.className = "sentence-mark";
@@ -599,7 +867,9 @@ function createSentenceMarks(wrap, targets) {
       mark.style.width = `${rect.width}px`;
       mark.style.height = `${rect.height}px`;
       layer.appendChild(mark);
+      marks.push(mark);
     }
+    markElementsByKey.set(`${target.pageNum}:${target.sentenceIndex}`, marks);
   }
   wrap.appendChild(layer);
 }
@@ -733,30 +1003,22 @@ function wireTextLayer(
   const derivedHeight = Math.max(0, ...words.map((word) => Number(word.y1) || 0));
   const width = Number.isFinite(pageWidth) ? pageWidth : Math.max(0, Number(wrapRect.width) || derivedWidth);
   const height = Number.isFinite(pageHeight) ? pageHeight : Math.max(0, Number(wrapRect.height) || derivedHeight);
-  const visualScale = width > 0 && Number(wrapRect.width) > 0 ? Number(wrapRect.width) / width : pdfZoom;
+  // 挂载时先用行级回退矩形（纯坐标计算，零布局开销）；
+  // 字符级精确矩形由 scheduleExactRectsWarmup 在空闲时升级，避免加载期同步布局风暴。
   const targets = analysisTargets.map((analysisTarget, sentenceIndex) => {
     if (!analysisTarget.locations.some((location) => location.pageNum === pageNum && location.sentenceIndex === sentenceIndex)) {
       analysisTarget.locations.push({ pageNum, sentenceIndex });
     }
-    const exactRects = buildSentenceDomRects(sentences[sentenceIndex], renderedTextDivs, wrapRect, width, height, null, visualScale);
-    const fallbackRects = buildSentenceLineRects(sentences[sentenceIndex], rowTol).map((rect) => {
-      const left = Math.max(0, Math.min(width, rect.left));
-      const top = Math.max(0, Math.min(height, rect.top));
-      const right = Math.max(left, Math.min(width, rect.left + rect.width));
-      const bottom = Math.max(top, Math.min(height, rect.top + rect.height));
-      return { left, top, width: right - left, height: bottom - top };
-    }).filter((rect) => rect.width > 0 && rect.height > 0);
     return {
       analysisTarget,
       pageNum,
       sentenceIndex,
-      rects: exactRects.length ? exactRects : fallbackRects,
+      rects: computeFallbackRects(sentences[sentenceIndex], rowTol, width, height),
     };
   });
   analysisTargets.forEach((target, sentenceIndex) => {
     pageSentenceTargets.set(`${pageNum}:${sentenceIndex}`, target);
   });
-  const sentenceGroups = new Map(analysisTargets.map((target, sentenceIndex) => [sentenceIndex, target.spans]));
   const normalize = (value) => String(value).replace(/\s+/g, " ").trim();
   const normalizedSentences = sentenceTexts.map(normalize);
 
@@ -786,8 +1048,7 @@ function wireTextLayer(
     }
     if (sentenceIndex < 0) continue;
     span.dataset.sentId = String(sentenceIndex);
-    if (!sentenceGroups.has(sentenceIndex)) sentenceGroups.set(sentenceIndex, []);
-    sentenceGroups.get(sentenceIndex).push(span);
+    analysisTargets[sentenceIndex].spans.push(span);
   }
 
   const eventTarget = (event) => {
@@ -799,13 +1060,34 @@ function wireTextLayer(
     );
     return localTarget ? localTarget.analysisTarget : null;
   };
-  textLayer.addEventListener("mousemove", (event) => {
+  // 悬停命中：leading 边同步处理（保证首次移动即时反馈），帧内后续事件合并为 trailing。
+  let hoverFrame = 0;
+  let pendingHover = null;
+  const processHover = (event) => {
     if (hasTextSelection()) return;
     const target = eventTarget(event);
     if (target) setPreview(target);
     else clearPreview();
+  };
+  textLayer.addEventListener("mousemove", (event) => {
+    if (hoverFrame) {
+      pendingHover = { clientX: event.clientX, clientY: event.clientY };
+      return;
+    }
+    processHover(event);
+    hoverFrame = requestUiFrame(() => {
+      hoverFrame = 0;
+      if (pendingHover) {
+        const latest = pendingHover;
+        pendingHover = null;
+        processHover(latest);
+      }
+    });
   });
-  textLayer.addEventListener("mouseleave", () => clearPreview());
+  textLayer.addEventListener("mouseleave", () => {
+    pendingHover = null;
+    clearPreview();
+  });
   textLayer.addEventListener("click", (event) => {
     if (hasTextSelection()) return;
     const target = eventTarget(event);
@@ -834,11 +1116,18 @@ function removeClassFromSpans(target, className) {
 }
 
 function toggleSentenceMarks(target, className, enabled) {
-  if (!target || !document.querySelectorAll) return;
+  if (!target) return;
   const locations = target.locations && target.locations.length
     ? target.locations
     : [{ pageNum: target.pageNum, sentenceIndex: target.sentenceIndex }];
   for (const location of locations) {
+    const key = `${Number(location.pageNum)}:${Number(location.sentenceIndex)}`;
+    const cached = markElementsByKey.get(key);
+    if (cached) {
+      for (const mark of cached) mark.classList.toggle(className, enabled);
+      continue;
+    }
+    if (!document.querySelectorAll) continue;
     const selector = `.sentence-mark[data-page-number="${Number(location.pageNum)}"][data-sent-id="${Number(location.sentenceIndex)}"]`;
     for (const mark of document.querySelectorAll(selector)) mark.classList.toggle(className, enabled);
   }
@@ -1119,18 +1408,9 @@ async function saveDocumentBookmarks(bookmarks) {
 }
 
 function currentVisiblePage() {
-  if (!document.querySelectorAll) return 1;
-  const pages = Array.from(document.querySelectorAll(".page-wrap[data-page-number]"));
-  if (!pages.length) return 1;
-  const paneTop = documentPane && documentPane.getBoundingClientRect ? documentPane.getBoundingClientRect().top : 0;
-  let best = pages[0];
-  let distance = Infinity;
-  for (const page of pages) {
-    const rect = page.getBoundingClientRect();
-    const nextDistance = Math.abs(rect.top - paneTop - 8);
-    if (rect.bottom > paneTop && nextDistance < distance) { best = page; distance = nextDistance; }
-  }
-  return Number(best.dataset.pageNumber) || 1;
+  if (!pageTops.length) return 1;
+  const scrollTop = documentPane ? (Number(documentPane.scrollTop) || 0) / (committedPdfZoom || 1) : 0;
+  return pageIndexAtScroll(pageTops, pageHeights, scrollTop) + 1;
 }
 
 function renderBookmarks() {
@@ -1270,6 +1550,60 @@ async function suggestComplexWordMeaning(word) {
   }
 }
 
+function renderWordInfoHtml(word, info) {
+  const chips = (label, items) => (items && items.length
+    ? `<div class="word-info-chips"><span class="word-info-label">${label}</span>${items.map((item) => `<span class="word-info-chip">${esc(item)}</span>`).join("")}</div>`
+    : "");
+  const posHtml = (info.pos_entries || []).map((entry) => `
+    <div class="word-info-pos">
+      <span class="word-info-pos-tag">${esc(entry.pos || "unknown")}</span>
+      ${(entry.definitions || []).length ? `<ol class="word-info-defs">${entry.definitions.map((definition) => `<li>${esc(definition)}</li>`).join("")}</ol>` : ""}
+      ${(entry.examples || []).map((example) => `<div class="word-info-example">例：${esc(example)}</div>`).join("")}
+      ${chips("同义", entry.synonyms)}
+    </div>`).join("");
+  return `
+    <div class="word-info-head">
+      <strong>${esc(info.word || word)}</strong>
+      ${info.phonetic ? `<span class="word-info-phonetic">${esc(info.phonetic)}</span>` : ""}
+      <span class="word-info-source">${esc(info.source || "在线词典")}</span>
+    </div>
+    ${posHtml}
+    ${chips("搭配", info.collocations)}
+    <div class="word-info-actions">
+      <button class="secondary-action" type="button" data-word-info-action="show-translation"${selectedTarget ? "" : " disabled"}>查看当前句译文</button>
+    </div>`;
+}
+
+function clearWordInfo() {
+  wordInfoSerial += 1;
+  if (complexWordInfo) {
+    complexWordInfo.hidden = true;
+    complexWordInfo.innerHTML = "";
+  }
+}
+
+async function loadWordInfo(word) {
+  if (!complexWordInfo) return;
+  const normalized = String(word || "").trim().toLowerCase();
+  if (!normalized) {
+    clearWordInfo();
+    return;
+  }
+  const requestId = ++wordInfoSerial;
+  complexWordInfo.hidden = false;
+  complexWordInfo.innerHTML = `<div class="word-info-empty">正在查询“${esc(normalized)}”的在线词典详情…</div>`;
+  try {
+    const response = await fetch(`/api/word-info?word=${encodeURIComponent(normalized)}`);
+    const data = await response.json();
+    if (requestId !== wordInfoSerial) return;
+    if (!response.ok || !data.info) throw new Error(data.error || `HTTP ${response.status}`);
+    complexWordInfo.innerHTML = renderWordInfoHtml(normalized, data.info);
+  } catch (error) {
+    if (requestId !== wordInfoSerial) return;
+    complexWordInfo.innerHTML = `<div class="word-info-empty">在线详情不可用（${esc(String(error))}），上方为本地释义。</div>`;
+  }
+}
+
 function editComplexWord(word) {
   const normalized = String(word || "").trim().toLowerCase();
   const entry = complexWordEntries.find((item) => item.word.toLowerCase() === normalized);
@@ -1286,6 +1620,8 @@ function editComplexWord(word) {
       : `已从原文选中“${normalized}”，正在自动查询中文释义。`;
   }
   if (!entry && normalized) suggestComplexWordMeaning(normalized);
+  if (normalized) loadWordInfo(normalized);
+  else clearWordInfo();
 }
 
 async function openComplexWords(word = "") {
@@ -1306,6 +1642,7 @@ async function openComplexWords(word = "") {
 
 function closeComplexWords() {
   if (!complexWordDialog || !complexWordToggle) return;
+  wordInfoSerial += 1;  // 关闭作废弃中的详情请求
   complexWordDialog.hidden = true;
   complexWordToggle.setAttribute("aria-expanded", "false");
 }
@@ -1338,7 +1675,7 @@ async function submitComplexWord(event) {
     renderComplexWordEntries(data.entry.word);
     editComplexWord(data.entry.word);
     if (complexWordMessage) complexWordMessage.textContent = `已保存“${data.entry.word}”，当前句会立即重新识别复杂词。`;
-    sentenceResults.clear();
+    invalidateSentenceResultsFor(data.entry.word);
     refreshSelectedAnalysis();
   } catch (error) {
     if (complexWordMessage) {
@@ -1367,7 +1704,7 @@ async function deleteComplexWord() {
     if (complexWordMessage) complexWordMessage.textContent = data.reverted_to_builtin
       ? `已删除“${word}”的自定义覆盖，恢复为内置释义。`
       : `已删除自定义复杂词“${word}”。`;
-    sentenceResults.clear();
+    invalidateSentenceResultsFor(word);
     refreshSelectedAnalysis();
   } catch (error) {
     if (complexWordMessage) {
@@ -1506,7 +1843,7 @@ async function restoreGlossaryBackup() {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    sentenceResults.clear();
+    invalidateSentenceResultsFor("");
     await Promise.all([loadGlossaryEntries(), loadGlossaryBackups()]);
     if (glossaryMessage) glossaryMessage.textContent = `已从 ${filename} 恢复术语表。`;
     if (selectedTarget) {
@@ -1604,7 +1941,7 @@ async function deleteGlossaryEntry() {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    sentenceResults.clear();
+    invalidateSentenceResultsFor(word);
     await Promise.all([loadGlossaryEntries(), loadGlossaryBackups()]);
     if (glossarySearch) glossarySearch.value = word;
     renderGlossaryEntries(word);
@@ -1649,7 +1986,7 @@ async function submitGlossaryEntry(event) {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    sentenceResults.clear();
+    invalidateSentenceResultsFor(data.entry.word);
     await Promise.all([loadGlossaryEntries(), loadGlossaryBackups()]);
     if (glossarySearch) glossarySearch.value = data.entry.word;
     renderGlossaryEntries(data.entry.word);
@@ -1708,9 +2045,11 @@ async function navigatePdfDestination(pdf, destination) {
     }
   }
   if (documentPane && typeof documentPane.scrollTo === "function") {
+    // offsetTop/scrollTop 是 CSS zoom 后的缩放坐标，页内坐标需同步乘以缩放倍率
+    const zoom = committedPdfZoom || 1;
     documentPane.scrollTo({
-      top: Math.max(0, offsetWithin(pageElement, documentPane, "top") + localY - 12),
-      left: Math.max(0, offsetWithin(pageElement, documentPane, "left") + localX - 12),
+      top: Math.max(0, offsetWithin(pageElement, documentPane, "top") + localY * zoom - 12),
+      left: Math.max(0, offsetWithin(pageElement, documentPane, "left") + localX * zoom - 12),
       behavior: "smooth",
     });
   } else if (pageElement.scrollIntoView) {
@@ -2463,18 +2802,26 @@ if (bookmarkContent) bookmarkContent.addEventListener("click", (event) => {
 });
 if (complexWordToggle) complexWordToggle.addEventListener("click", () => openComplexWords());
 if (complexWordClose) complexWordClose.addEventListener("click", closeComplexWords);
-if (complexWordSearch) complexWordSearch.addEventListener("input", (event) => renderComplexWordEntries(event.target.value));
+if (complexWordSearch) complexWordSearch.addEventListener("input", (event) => renderComplexWordEntriesDebounced(event.target.value));
 if (complexWordList) complexWordList.addEventListener("click", (event) => {
   const entry = event.target && event.target.closest ? event.target.closest("[data-complex-word]") : null;
   if (entry) editComplexWord(entry.dataset.complexWord);
 });
 if (complexWordForm) complexWordForm.addEventListener("submit", submitComplexWord);
+if (complexWordInfo) complexWordInfo.addEventListener("click", (event) => {
+  const button = event.target && event.target.closest ? event.target.closest("[data-word-info-action]") : null;
+  if (!button || button.disabled) return;
+  if (button.dataset.wordInfoAction === "show-translation") {
+    closeComplexWords();
+    if (panelCollapsed) setPanelCollapsed(false);
+  }
+});
 if (complexWordWord) complexWordWord.addEventListener("input", syncComplexWordDeleteState);
 if (complexWordDelete) complexWordDelete.addEventListener("click", deleteComplexWord);
 if (complexWordDialog) complexWordDialog.addEventListener("click", (event) => { if (event.target === complexWordDialog) closeComplexWords(); });
 if (glossaryToggle) glossaryToggle.addEventListener("click", () => openGlossary());
 if (glossaryClose) glossaryClose.addEventListener("click", closeGlossary);
-if (glossarySearch) glossarySearch.addEventListener("input", (event) => renderGlossaryEntries(event.target.value));
+if (glossarySearch) glossarySearch.addEventListener("input", (event) => renderGlossaryEntriesDebounced(event.target.value));
 if (glossaryList) glossaryList.addEventListener("click", (event) => {
   const entry = event.target && event.target.closest ? event.target.closest("[data-glossary-word]") : null;
   if (entry) editGlossaryEntry(entry.dataset.glossaryWord);
@@ -2524,6 +2871,19 @@ async function openPdf(file) {
   placeholder.hidden = true;
   sentenceResults.clear();
   pageSentenceTargets.clear();
+  // 重置页面虚拟化状态
+  if (pageObserver) {
+    pageObserver.disconnect();
+    pageObserver = null;
+  }
+  for (const timer of mountTimers.values()) clearTimeout(timer);
+  mountTimers.clear();
+  mountedPages.clear();
+  visibleSlots.clear();
+  pageDataByNum.clear();
+  markElementsByKey.clear();
+  pageTops = [];
+  pageHeights = [];
   currentDocumentKey = `${file.name}:${Number(file.size) || 0}`;
   bookmarkLoadSerial++;
   bookmarkCacheKey = null;
@@ -2546,9 +2906,10 @@ async function openPdf(file) {
     activeLoadingTask = null;
     currentPdf = pdf;
     updatePageStatus();
+    ensurePageObserver();
     const documentSentenceState = { nextId: 0, pending: null };
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-      await renderPage(pdf, pageNum, pagesEl, documentSentenceState);
+      await parsePage(pdf, pageNum, pagesEl, documentSentenceState, loadId);
       if (loadId !== documentLoadSerial || pdf !== currentPdf) return;
       setDocumentLabel(file, `正在加载 ${pageNum}/${pdf.numPages} 页`);
       updatePageStatus();
@@ -2585,6 +2946,26 @@ syncAnalysisControls();
 restorePanelWidth();
 restoreOutlineWidth();
 restorePdfZoom();
+
+/* 测试钩子：暴露虚拟化内部状态只读访问，供回归测试验证挂载/回收语义。生产环境不依赖。 */
+globalThis.__parseSpecViewerTest = {
+  get mountedPageCount() { return mountedPages.size; },
+  get mountedPageNums() { return [...mountedPages.keys()]; },
+  get hasPageObserver() { return Boolean(pageObserver); },
+  get visibleSlotCount() { return visibleSlots.size; },
+  get activeRenderCount() { return activeRenders; },
+  get renderQueueLength() { return renderQueue.length; },
+  get pageCount() { return pageDataByNum.size; },
+  setPageObserver(value) { pageObserver = value; },
+  setVisibleSlots(nums) { visibleSlots.clear(); nums.forEach((n) => visibleSlots.add(n)); },
+  setMountedPages(nums) {
+    mountedPages.clear();
+    nums.forEach((n) => mountedPages.set(n, { pageNum: n, stage: "mounted", loadId: documentLoadSerial }));
+  },
+  enforceMountedPageLimit,
+  unmountPage,
+  currentVisiblePage,
+};
 setPanelCollapsed(isNarrowViewport());
 
 function esc(value) {

@@ -109,3 +109,64 @@ test("模块启动顺序保证辅助函数先于阅读器加载", () => {
   assert.match(css, /--text-scale-factor/);
   assert.match(css, /scaleX\(var\(--scale-x\)\)/);
 });
+
+test("pageIndexAtScroll 用二分找到第一个 bottom 超过滚动位置的页", () => {
+  const { pageIndexAtScroll } = loadHelpers();
+  const tops = [0, 1020, 2040];
+  const heights = [1000, 1000, 1000];
+  assert.equal(pageIndexAtScroll(tops, heights, 0), 0);
+  assert.equal(pageIndexAtScroll(tops, heights, 995, 0), 0);
+  assert.equal(pageIndexAtScroll(tops, heights, 995), 1);  // 默认 bias=8 提前翻页
+  assert.equal(pageIndexAtScroll(tops, heights, 1010), 1);
+  assert.equal(pageIndexAtScroll(tops, heights, 99999), 2);
+  assert.equal(pageIndexAtScroll([], [], 100), 0);
+});
+
+test("visiblePageRange 返回含 margin 的 1-based 闭区间", () => {
+  const { visiblePageRange } = loadHelpers();
+  const tops = [0, 1020, 2040, 3060];
+  const heights = [1000, 1000, 1000, 1000];
+  const roundTrip = (value) => JSON.parse(JSON.stringify(value));
+  assert.deepEqual(roundTrip(visiblePageRange(tops, heights, 0, 800, 0)), { start: 1, end: 1 });
+  assert.deepEqual(roundTrip(visiblePageRange(tops, heights, 0, 800, 500)), { start: 1, end: 2 });
+  assert.deepEqual(roundTrip(visiblePageRange(tops, heights, 2040, 1000, 2000)), { start: 1, end: 4 });
+});
+
+test("fitCanvasScale 同时封顶倍率与总像素", () => {
+  const { fitCanvasScale } = loadHelpers();
+  assert.equal(fitCanvasScale(600, 800, 2.8), 2.8);
+  assert.equal(fitCanvasScale(600, 800, 9), 3.2);
+  const capped = fitCanvasScale(4000, 4000, 3.2, { maxPixels: 16e6 });
+  assert.ok(4000 * capped * (4000 * capped) <= 16e6);
+  assert.equal(fitCanvasScale(600, 800, NaN), 1);
+});
+
+test("debounce 只保留最后一次调用", () => {
+  const { debounce } = loadHelpers();
+  const timers = new Map();
+  let nextId = 1;
+  const fakeTimers = {
+    setTimeout: (callback) => { const id = nextId++; timers.set(id, callback); return id; },
+    clearTimeout: (id) => timers.delete(id),
+  };
+  const calls = [];
+  const debounced = debounce((value) => calls.push(value), 150, fakeTimers);
+  debounced("a");
+  debounced("b");
+  debounced("c");
+  assert.equal(timers.size, 1);
+  for (const callback of [...timers.values()]) callback();
+  assert.deepEqual(calls, ["c"]);
+});
+
+test("computeFallbackRects 裁剪到页面边界并过滤空矩形", () => {
+  const { computeFallbackRects } = loadHelpers();
+  const rects = JSON.parse(JSON.stringify(computeFallbackRects([
+    { text: "A", x0: -5, x1: 30, y0: 20, y1: 32 },
+    { text: "B", x0: 34, x1: 60, y0: 20, y1: 32 },
+  ], 5, 100, 80)));
+  assert.equal(rects.length, 1);
+  assert.equal(rects[0].left, 0);
+  assert.ok(rects[0].width <= 100);
+  assert.deepEqual(JSON.parse(JSON.stringify(computeFallbackRects([], 5, 100, 80))), []);
+});
