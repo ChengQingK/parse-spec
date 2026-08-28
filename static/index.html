@@ -176,7 +176,7 @@
       </section>
       <form id="complex-word-form" class="glossary-form complex-word-form">
         <div><div class="eyebrow">新增或覆盖</div><h3>自定义复杂词</h3></div>
-        <label class="glossary-field-word">英文单词<input id="complex-word-word" name="word" required maxlength="120" pattern="[A-Za-z][A-Za-z'-]*" placeholder="例如 interfere"></label>
+        <label class="glossary-field-word">英文单词<input id="complex-word-word" name="word" required maxlength="120" pattern="[A-Za-z]+(?:['-][A-Za-z]+)*" placeholder="例如 interfere"></label>
         <label class="glossary-field-pos">难度<select id="complex-word-level" name="level"><option value="进阶">进阶</option><option value="较难" selected>较难</option></select></label>
         <label class="glossary-field-zh">中文释义<input id="complex-word-zh" name="zh" required maxlength="240" placeholder="例如 干扰；妨碍"></label>
         <label class="glossary-field-note">说明<textarea id="complex-word-note" name="note" maxlength="800" rows="4" placeholder="可选：解释该词在技术文档中的常见含义"></textarea></label>

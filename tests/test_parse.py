@@ -3,7 +3,10 @@
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
+import urllib.error
+import urllib.request
 from unittest.mock import patch
 
 from parse.clauser import parse_sentence, split_sentences
@@ -150,6 +153,19 @@ class SentenceParserTests(unittest.TestCase):
         self.assertEqual(by_lemma["interfere"]["zh"], "干扰；妨碍")
         self.assertTrue(all(" " not in item["word"] for item in hits))
 
+    def test_extract_complex_words_reuses_precomputed_lemma_spans(self):
+        calls = []
+
+        class ExplodingNLP:
+            def __call__(self, *_args, **_kwargs):
+                calls.append(1)
+                raise AssertionError("不应再次运行 spaCy")
+
+        with patch.object(spacy_parser, "_NLP", ExplodingNLP()), patch.object(spacy_parser, "_SPACY_OK", True):
+            hits = extract_complex_words("ensure the result", ComplexWordTable(), [(0, 6, "ensure")])
+        self.assertEqual([item["lemma"] for item in hits], ["ensure"])
+        self.assertEqual(calls, [])  # 提供了 lemma_spans 就不能再触发第二次解析
+
 
 class GlossaryTests(unittest.TestCase):
     def test_variant_and_user_override(self):
@@ -231,6 +247,36 @@ class ApiTests(unittest.TestCase):
         self.assertIn("grammar", result["clauses"][0])
         self.assertIn("evidence_sources", result["clauses"][0]["grammar"])
         self.assertIn("segments", result["clauses"][0])
+
+    def test_analyze_runs_spacy_pipeline_once_per_sentence(self):
+        original = spacy_parser._NLP
+        calls = []
+
+        class CountingNLP:
+            def __call__(self, text):
+                calls.append(text)
+                return original(text)
+
+        with patch.object(spacy_parser, "_NLP", CountingNLP()):
+            response = self.client.post(
+                "/api/analyze",
+                json={"sentences": ["The data is latched into the register."]},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, ["The data is latched into the register."])  # 修复前同一句会被解析两次
+
+    def test_rejects_unexpected_host_header(self):
+        response = self.client.get("/", headers={"Host": "evil.example.com"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("127.0.0.1", response.get_json()["error"])
+        ok = self.client.get("/", headers={"Host": "127.0.0.1:5197"})
+        self.assertEqual(ok.status_code, 200)
+
+    def test_rejects_dangling_hyphen_words(self):
+        response = self.client.get("/api/word-info", query_string={"word": "interfere-"})
+        self.assertEqual(response.status_code, 400)
+        valid = self.client.get("/api/word-info", query_string={"word": "zzzzunknown"})
+        self.assertEqual(valid.status_code, 404)  # 合法词形照常进入查询路径
 
     def test_uses_spacy_lemma_for_irregular_glossary_hit(self):
         response = self.client.post(
@@ -607,6 +653,40 @@ class OnlineDictionaryTests(unittest.TestCase):
         dictionary._fetch = lambda word: self.fail("非法单词不应触发网络请求")
         self.assertIsNone(dictionary.lookup("two words"))
         self.assertIsNone(dictionary.lookup(""))
+
+    def test_word_pattern_rejects_dangling_connectors(self):
+        self.assertTrue(online_dict._WORD_RE.fullmatch("mother-in-law"))
+        self.assertFalse(online_dict._WORD_RE.fullmatch("interfere-"))
+        self.assertFalse(online_dict._WORD_RE.fullmatch("'interfere"))
+
+    def test_safe_redirect_handler_blocks_cross_host_hops(self):
+        handler = online_dict._SafeRedirectHandler(online_dict.YOUDAO_HOST)
+        request = urllib.request.Request("https://dict.youdao.com/jsonapi?q=x")
+        kept = handler.redirect_request(request, None, 302, "Found", {}, "https://dict.youdao.com/jsonapi?q=y")
+        self.assertIsNotNone(kept)  # 同主机重定向放行
+        with self.assertRaises(urllib.error.HTTPError):
+            handler.redirect_request(request, None, 302, "Found", {}, "https://127.0.0.1/steal")
+        with self.assertRaises(urllib.error.HTTPError):
+            handler.redirect_request(request, None, 302, "Found", {}, "http://dict.youdao.com/jsonapi?q=z")
+        self.assertFalse(online_dict._is_expected_url("https://evil.com/x", online_dict.YOUDAO_HOST))
+        self.assertTrue(online_dict._is_expected_url("https://dict.youdao.com/jsonapi", online_dict.YOUDAO_HOST))
+
+    def test_cache_save_coalesces_timestamp_only_refreshes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "word_cache.json"
+            dictionary = online_dict.OnlineDictionary(cache_path)
+            dictionary._fetch = lambda word: ("not_found", None)
+            self.assertIsNone(dictionary.lookup("zzzunknown"))
+            self.assertTrue(cache_path.exists())  # 新词条立即落盘，重启后负缓存仍生效
+            self.assertEqual(len(json.loads(cache_path.read_text(encoding="utf-8"))), 1)
+
+            record = dictionary._mem["zzzunknown"]
+            record["fetched_at"] = online_dict._now().isoformat()
+            dictionary._dirty = True  # 模拟 30s 内只有时间戳刷新：不应立刻重写
+            dictionary._last_save = time.monotonic()
+            before = cache_path.stat().st_mtime_ns
+            dictionary._maybe_save()
+            self.assertEqual(cache_path.stat().st_mtime_ns, before)
 
     YOUDAO_PAYLOAD = {
         "ec": {

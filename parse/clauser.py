@@ -67,6 +67,8 @@ class ParsedSentence:
     engine: str = "rule-fallback"
     warnings: list[str] = field(default_factory=list)
     term_candidates: list[tuple[str, str]] = field(default_factory=list, repr=False)
+    # (start, end, lemma)：spaCy 路径随解析一并产出，供复杂词识别复用，避免二次解析。
+    lemma_spans: list[tuple[int, int, str]] = field(default_factory=list, repr=False)
 
 
 @dataclass(slots=True)

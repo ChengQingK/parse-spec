@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 import re
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 # 每行：英文词条<TAB>词性<TAB>中文释义<TAB>说明。
@@ -142,8 +146,8 @@ class Glossary:
                     "zh": str(value["zh"]),
                     "note": str(value.get("note", "")),
                 }
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            print(f"[glossary] 用户词典加载失败: {exc}")
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("用户词典加载失败: %s", exc)
 
     def lookup(self, word: str) -> dict[str, str | bool] | None:
         """查词并做轻量词形还原；未命中返回 ``None``。"""

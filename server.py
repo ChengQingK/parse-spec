@@ -146,7 +146,7 @@ def _analyze_sentence(s: str) -> dict:
         "main_clause_id": ps.main_clause_id,
         "clauses": [asdict(clause) for clause in ps.clauses],
         "terms": words,
-        "complex_words": extract_complex_words(ps.text, _complex_words),
+        "complex_words": extract_complex_words(ps.text, _complex_words, ps.lemma_spans),
         "translation": translate_sentence(ps, _glossary),
         "warnings": ps.warnings,
     }
@@ -371,6 +371,19 @@ def _write_bookmark_sets(bookmark_sets: dict[str, list[dict]]) -> None:
     temporary_path.replace(_bookmarks_path)
 
 
+# 单词仅允许“字母段 + 可选的中间连字符/撇号”，拒绝 "word-" 这类残缺形态。
+_WORD_PATTERN = r"[a-z]+(?:['-][a-z]+)*"
+
+
+@app.before_request
+def reject_unexpected_host():
+    """仅接受本机 Host，阻断 DNS rebinding 把浏览器请求转发到本服务的尝试。"""
+    hostname = (request.host or "").rsplit(":", 1)[0].strip("[]").lower()
+    if hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return jsonify({"error": "服务仅允许通过 127.0.0.1 / localhost 访问"}), 403
+    return None
+
+
 @app.get("/")
 def index():
     return send_from_directory(STATIC, "index.html")
@@ -522,7 +535,7 @@ def restore_glossary_backup():
         restored = _normalize_user_glossary(json.loads(source.read_text(encoding="utf-8-sig")))
         _create_glossary_backup("before-restore")
         _write_user_glossary(restored)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         return jsonify({"error": f"无法恢复术语表：{exc}"}), 400
     global _glossary_signature
     _glossary_signature = None
@@ -534,7 +547,7 @@ def restore_glossary_backup():
 def suggest_complex_word():
     """为右击添加的单词查询本地释义，避免要求用户自行解释陌生词。"""
     word = request.args.get("word", "").strip().lower()
-    if not re.fullmatch(r"[a-z][a-z'-]*", word):
+    if not re.fullmatch(_WORD_PATTERN, word):
         return jsonify({"error": "复杂词必须是单个英文单词"}), 400
     _refresh_glossary_if_changed()
     _refresh_complex_words_if_changed()
@@ -587,7 +600,7 @@ def word_info():
     联网只发生在本端点，带磁盘缓存与短超时；整句翻译路径不经过这里。
     """
     word = request.args.get("word", "").strip().lower()
-    if not re.fullmatch(r"[a-z][a-z'-]*", word):
+    if not re.fullmatch(_WORD_PATTERN, word):
         return jsonify({"error": "必须是单个英文单词"}), 400
     lemma = lemma_for_word(word) or word
     for candidate in dict.fromkeys((word, lemma)):
@@ -615,7 +628,7 @@ def save_complex_word():
     zh = str(data.get("zh", "")).strip()
     level = str(data.get("level", "较难")).strip() or "较难"
     note = str(data.get("note", "")).strip()
-    if not re.fullmatch(r"[a-z][a-z'-]*", word):
+    if not re.fullmatch(_WORD_PATTERN, word):
         return jsonify({"error": "复杂词必须是单个英文单词"}), 400
     if not zh:
         return jsonify({"error": "中文释义不能为空"}), 400

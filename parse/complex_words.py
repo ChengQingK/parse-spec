@@ -7,10 +7,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import json
 from pathlib import Path
 from typing import Any
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 # level 是面向本工具的阅读难度提示；释义优先表达技术规范中的常见含义。
@@ -104,7 +108,8 @@ class ComplexWordTable:
                                 "level": str(raw_entry.get("level", "较难")).strip() or "较难",
                                 "note": str(raw_entry.get("note", "")).strip(),
                             }
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                LOGGER.warning("复杂词表加载失败: %s", exc)
                 self.user = {}
 
     @property
@@ -126,23 +131,35 @@ class ComplexWordTable:
         return [merged[word] for word in sorted(merged)]
 
 
-def extract_complex_words(text: str, table: ComplexWordTable | None = None) -> list[dict[str, Any]]:
-    """返回单个难词，不把固定词组或带下划线的技术标识符混入。"""
+def extract_complex_words(
+    text: str,
+    table: ComplexWordTable | None = None,
+    lemma_spans: list[tuple[int, int, str]] | None = None,
+) -> list[dict[str, Any]]:
+    """返回单个难词，不把固定词组或带下划线的技术标识符混入。
+
+    ``lemma_spans`` 是 ``parse_sentence`` 已产出的 (start, end, lemma) 序列；
+    传入后不再对同一文本重复运行 spaCy，只有未提供时才回退到内部解析。
+    """
     source = str(text or "")
     if not source:
         return []
     registry = table or ComplexWordTable()
     lemmas: dict[tuple[int, int], str] = {}
-    try:
-        from .spacy_parser import _NLP, _SPACY_OK
+    if lemma_spans is None:
+        try:
+            from .spacy_parser import _NLP, _SPACY_OK
 
-        if _SPACY_OK and _NLP is not None:
-            doc = _NLP(source)
-            for token in doc:
-                if token.is_alpha:
-                    lemmas[(token.idx, token.idx + len(token.text))] = token.lemma_.lower()
-    except Exception:
-        pass
+            if _SPACY_OK and _NLP is not None:
+                doc = _NLP(source)
+                for token in doc:
+                    if token.is_alpha:
+                        lemmas[(token.idx, token.idx + len(token.text))] = token.lemma_.lower()
+        except Exception:
+            pass
+    else:
+        for start, end, lemma in lemma_spans:
+            lemmas[(start, end)] = lemma
 
     result: list[dict[str, Any]] = []
     seen: set[str] = set()

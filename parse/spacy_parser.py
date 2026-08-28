@@ -607,4 +607,9 @@ def parse_spacy(text: str) -> ParsedSentence | None:
             for token in doc
             if token.is_alpha and not token.is_space
         ],
+        lemma_spans=[
+            (token.idx, token.idx + len(token.text), token.lemma_.lower())
+            for token in doc
+            if token.is_alpha and not token.is_space
+        ],
     )

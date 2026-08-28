@@ -15,6 +15,7 @@ dictionaryapi.dev（freeapi）；某源网络失败后会熔断跳过一段时�
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -27,13 +28,18 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
+LOGGER = logging.getLogger(__name__)
+
 API_URL = "https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
 YOUDAO_URL = "https://dict.youdao.com/jsonapi?q={word}&doctype=json"
+API_HOST = "api.dictionaryapi.dev"
+YOUDAO_HOST = "dict.youdao.com"
 TIMEOUT_SECONDS = 2.5
 MAX_CACHE_ENTRIES = 2000
 NOT_FOUND_TTL_SECONDS = 24 * 3600  # API 明确未收录：一天内不再重试
 ERROR_TTL_SECONDS = 3600           # 网络错误：一小时后允许重试；命中缓存永久有效
 BREAKER_COOLDOWN_SECONDS = 30 * 60  # 单源网络失败后熔断跳过的时长
+CACHE_SAVE_MIN_INTERVAL_SECONDS = 30  # 仅时间戳更新的记录合并落盘，避免每个新词都全量重写
 SOURCE_ENV = "PARSE_SPEC_DICT_SOURCES"
 DEFAULT_SOURCES = ("youdao", "freeapi")
 MAX_POS_ENTRIES = 4
@@ -45,7 +51,7 @@ MAX_COLLOCATIONS = 6
 MAX_ZH_GLOSSES = 6
 MAX_FIELD_CHARS = 300
 
-_WORD_RE = re.compile(r"[a-z][a-z'-]*")
+_WORD_RE = re.compile(r"[a-z]+(?:['-][a-z]+)*")
 # 动词/名词后接介词是最常见的搭配形态，从例句中轻量抽取。
 _FOLLOW_PREPOSITIONS = {
     "in", "on", "at", "with", "to", "for", "from", "of", "by", "between",
@@ -266,12 +272,45 @@ def _normalize_youdao(payload: Any, word: str) -> dict[str, Any] | None:
     }
 
 
+def _is_expected_url(url: Any, expected_host: str) -> bool:
+    """只接受指向预期词典主机的 https 地址，阻断重定向到内网或其它站点。"""
+    try:
+        parsed = urllib.parse.urlparse(str(url))
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() == expected_host
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """词典请求的重定向守卫：每一跳都必须仍指向预期主机。"""
+
+    def __init__(self, allowed_host: str):
+        self.allowed_host = allowed_host
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_expected_url(newurl, self.allowed_host):
+            raise urllib.error.HTTPError(newurl, code, "词典重定向目标不在预期主机", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_validated(url: str, expected_host: str, user_agent: str):
+    """校验初始地址后发起请求，并复核最终响应地址未被重定向到其它主机。"""
+    if not _is_expected_url(url, expected_host):
+        raise urllib.error.URLError(f"拒绝访问非预期的词典地址：{url}")
+    http_request = urllib.request.Request(url, headers={"User-Agent": user_agent})
+    opener = urllib.request.build_opener(_SafeRedirectHandler(expected_host))
+    response = opener.open(http_request, timeout=TIMEOUT_SECONDS)
+    if not _is_expected_url(response.geturl(), expected_host):
+        response.close()
+        raise urllib.error.URLError("词典响应来自非预期主机")
+    return response
+
+
 def _fetch_youdao(word: str) -> tuple[str, dict[str, Any] | None]:
     """返回 (状态, 结果)：状态区分 hit / not_found / error，供缓存 TTL 使用。"""
     url = YOUDAO_URL.format(word=urllib.parse.quote(word))
-    http_request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (parse-spec dictionary client)"})
     try:
-        with urllib.request.urlopen(http_request, timeout=TIMEOUT_SECONDS) as response:
+        with _open_validated(url, YOUDAO_HOST, "Mozilla/5.0 (parse-spec dictionary client)") as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return ("not_found" if exc.code == 404 else "error"), None
@@ -287,9 +326,8 @@ def _fetch_youdao(word: str) -> tuple[str, dict[str, Any] | None]:
 def _fetch_freeapi(word: str) -> tuple[str, dict[str, Any] | None]:
     """dictionaryapi.dev 源，行为与旧单源实现一致。"""
     url = API_URL.format(word=urllib.parse.quote(word))
-    http_request = urllib.request.Request(url, headers={"User-Agent": "parse-spec/1.0"})
     try:
-        with urllib.request.urlopen(http_request, timeout=TIMEOUT_SECONDS) as response:
+        with _open_validated(url, API_HOST, "parse-spec/1.0") as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return ("not_found" if exc.code == 404 else "error"), None
@@ -317,7 +355,11 @@ class OnlineDictionary:
         self._cooldown: dict[str, float] = {}
         self._mem: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._dirty = False
+        self._saved_count = 0
+        self._last_save = 0.0
         self._load_cache()
+        self._saved_count = len(self._mem)  # 磁盘已有内容不视为待写入变更
 
     def lookup(self, word: str) -> dict[str, Any] | None:
         key = str(word or "").strip().lower()
@@ -333,11 +375,23 @@ class OnlineDictionary:
             self._mem[key] = record
             while len(self._mem) > MAX_CACHE_ENTRIES:
                 del self._mem[next(iter(self._mem))]  # FIFO：dict 保持插入序
-            try:
-                self._save_cache()
-            except OSError:
-                pass  # 缓存写失败不影响本次查询结果
+            self._dirty = True
+            self._maybe_save()
         return result
+
+    def _maybe_save(self) -> None:
+        """新词条立即落盘；仅时间戳刷新（TTL 重取）按最小间隔合并，避免高频全量重写。"""
+        count_changed = len(self._mem) != self._saved_count
+        due = count_changed or (time.monotonic() - self._last_save) >= CACHE_SAVE_MIN_INTERVAL_SECONDS
+        if not self._dirty or not due:
+            return
+        try:
+            self._save_cache()
+        except OSError:
+            return  # 缓存写失败不影响本次查询结果，留待下次再试
+        self._saved_count = len(self._mem)
+        self._last_save = time.monotonic()
+        self._dirty = False
 
     @staticmethod
     def _expired(record: dict[str, Any]) -> bool:
@@ -386,7 +440,8 @@ class OnlineDictionary:
             return
         try:
             value = json.loads(self.cache_path.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("在线词典缓存读取失败: %s", exc)
             return
         if not isinstance(value, dict):
             return
