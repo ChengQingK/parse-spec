@@ -11,6 +11,8 @@ let loaded = false;
 function ensureBrowserScriptsLoaded() {
   if (loaded) return;
   require("../../static/pdf_helpers.js");
+  require("../../static/viewer_sentences.js");
+  require("../../static/viewer_marks.js");
   require("../../static/viewer.js");
   loaded = true;
 }
