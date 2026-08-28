@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""完全离线的结构辅助翻译器。
+"""完全离线的结构辅助翻译引擎。
 
-它不冒充大模型翻译：优先使用用户/内置术语表，再结合技术规范常见短语、
-情态和被动语态规则生成可读中文，并把能力边界随结果返回给 UI。
+它不冒充大模型翻译：语料层（translation_corpus）提供短语表、用户词表与
+整句模板，引擎负责术语表优先、占位替换、中英文边界与能力边界警告。
 """
 
 from __future__ import annotations
@@ -10,58 +10,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .translation_corpus import TranslationCorpus, default_corpus
 
-_PHRASES = {
-    "do not interfere with signals on the dram interface": "不与 DRAM 接口上的信号发生 interfere",
-    "update modes when the dfi bus is placed in an idle state": "DFI 总线处于空闲状态时可用的更新模式",
-    "signals on the dram interface": "DRAM 接口上的信号",
-    "is placed in an idle state": "处于空闲状态",
-    "do not interfere with": "不 interfere",
-    "to ensure that": "为 ensure",
-    "the dfi bus": "DFI 总线",
-    "update modes": "更新模式",
-    "the minimum number of additional data clocks": "最少附加数据时钟数",
-    "minimum number of additional data clocks": "最少附加数据时钟数",
-    "a minimum additional delay": "最小附加延迟",
-    "target chip select": "目标片选",
-    "timing parameter": "时序参数",
-    "required between commands": "命令之间所需的",
-    "between commands": "在命令之间",
-    "as required by": "按照……的要求",
-    "which is driven by the controller": "其由控制器驱动",
-    "at the rising edge of the clock": "在时钟上升沿",
-    "at the falling edge": "在下降沿",
-    "is latched into": "被锁存到",
-    "rising edge": "上升沿",
-    "falling edge": "下降沿",
-    "signals, timing parameters and programmable parameters required to transfer command information and data": "传输命令信息和数据所需的信号、时序参数和可编程参数",
-    "signals, timing parameters and programmable parameters": "信号、时序参数和可编程参数",
-    "across the dfi and between": "通过 DFI 在",
-    "command information and data": "命令信息和数据",
-    "as long as": "只要",
-    "as soon as": "一旦",
-    "even if": "即使",
-    "even though": "尽管",
-    "in order to": "为了",
-    "in order that": "为了",
-    "is required to": "必须",
-    "are required to": "必须",
-    "shall not": "不得",
-    "must not": "不得",
-    "may not": "可能不允许",
-    "so that": "以便",
-    "such that": "从而",
-    "that defines": "，它定义",
-    "is an": "是一种",
-    "is a": "是一种",
-    "required to transfer": "需要传输",
-    "applies to": "适用于",
-    "does not encompass": "不涵盖",
-    "does not": "不",
-    "nor does": "也不",
-    "with respect to": "关于",
-}
 
+# 通用功能词与内容词：翻译引擎的基础词汇，领域语料见 translation_corpus。
 _WORDS = {
     "a": "", "an": "", "the": "", "this": "该", "that": "该", "these": "这些", "those": "那些",
     "it": "它", "they": "它们", "each": "每个", "all": "所有", "any": "任何", "both": "两者",
@@ -93,7 +45,7 @@ _WORDS = {
     "system": "系统", "memory": "存储器", "operation": "操作", "request": "请求", "response": "响应",
     "cycle": "周期", "time": "时间", "state": "状态", "sequence": "序列", "control": "控制",
     "low": "低", "high": "高", "power": "功耗", "calibration": "校准", "background": "后台",
-    "changing": "切换", "change": "切换", "between": "在……之间", "sharing": "共享",
+    "changing": "切换", "change": "切换", "sharing": "共享",
     "same": "相同", "different": "不同", "following": "以下", "previous": "前一个", "subsequent": "后续",
     "first": "第一个", "last": "最后一个", "more": "更多", "less": "更少", "other": "其他",
     "true": "真", "false": "假", "set": "设置", "cleared": "清除", "clear": "清除",
@@ -104,14 +56,6 @@ _WORDS = {
 
 _TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_'-]*(?:\[[^\]]+\])?|\d+(?:\.\d+)?|[^\w\s]", re.UNICODE)
 _TECHNICAL = re.compile(r"(?:[A-Z]{2,}[A-Za-z0-9_]*|[A-Za-z]+\d+[A-Za-z0-9_]*|[a-z]+_[A-Za-z0-9_]+|t[A-Z][A-Za-z0-9_]*)$")
-_TIMING_PARAMETER_DEFINITION = re.compile(
-    r"^The\s+(?P<parameter>.+?)\s+timing\s+parameter\s+specifies\s+the\s+minimum\s+number\s+of\s+"
-    r"additional\s+Data\s+clocks\s+required\s+between\s+commands\s+when\s+changing\s+the\s+target\s+"
-    r"chip\s+select\s+driven\s+on\s+the\s+(?P<signal>[A-Za-z0-9_]+)\s+signal\s+and\s+defines\s+a\s+"
-    r"minimum\s+additional\s+delay\s+between\s+commands\s+when\s+changing\s+the\s+target\s+chip\s+"
-    r"select\s+as\s+required\s+by\s+the\s+(?P<authority>[A-Za-z0-9_]+)\.?$",
-    re.I,
-)
 
 
 def _lemma_candidates(word: str) -> list[str]:
@@ -128,7 +72,7 @@ def _lemma_candidates(word: str) -> list[str]:
     return list(dict.fromkeys(result))
 
 
-def _translate_word(token: str, glossary: Any) -> str:
+def _translate_word(token: str, glossary: Any, corpus: TranslationCorpus | None = None) -> str:
     if _TECHNICAL.fullmatch(token):
         return token
     if token.isdigit() or re.fullmatch(r"\d+(?:\.\d+)?", token):
@@ -136,18 +80,21 @@ def _translate_word(token: str, glossary: Any) -> str:
     entry = glossary.lookup(token) if glossary is not None else None
     if entry and entry.get("zh"):
         return str(entry["zh"]).split("；", 1)[0].split("/", 1)[0]
+    user_words = corpus.words if corpus is not None else {}
     for candidate in _lemma_candidates(token):
+        if candidate in user_words:
+            return user_words[candidate]
         if candidate in _WORDS:
             return _WORDS[candidate]
     return token
 
 
-def lookup_word_translation(word: str, glossary: Any = None) -> str | None:
-    """从本地术语表和结构翻译词库查询单词释义；未命中时明确返回 None。"""
+def lookup_word_translation(word: str, glossary: Any = None, corpus: TranslationCorpus | None = None) -> str | None:
+    """从术语表、用户语料和结构翻译词库查询单词释义；未命中时明确返回 None。"""
     source = str(word or "").strip()
     if not source:
         return None
-    translated = _translate_word(source, glossary)
+    translated = _translate_word(source, glossary, corpus if corpus is not None else default_corpus())
     if not translated or translated.casefold() == source.casefold():
         return None
     return translated
@@ -182,55 +129,48 @@ def _join(tokens: list[str]) -> str:
     return result.strip()
 
 
-def translate_text(text: str, glossary: Any) -> str:
+def translate_text(text: str, glossary: Any, corpus: TranslationCorpus | None = None) -> str:
+    if corpus is None:
+        corpus = default_corpus()
     protected = text
     phrase_values: dict[str, str] = {}
-    for index, (phrase, chinese) in enumerate(sorted(_PHRASES.items(), key=lambda item: -len(item[0]))):
-        placeholder = f"PHRASE{index}TOKEN"
+    for phrase, chinese in corpus.sorted_phrases():
+        placeholder = f"PHRASE{len(phrase_values)}TOKEN"
         next_text = re.sub(rf"\b{re.escape(phrase)}\b", placeholder, protected, flags=re.I)
         if next_text != protected:
             phrase_values[placeholder] = chinese
             protected = next_text
     translated = []
     for token in _TOKEN.findall(protected):
-        translated.append(phrase_values.get(token, _translate_word(token, glossary)))
+        translated.append(phrase_values.get(token, _translate_word(token, glossary, corpus)))
     result = _join(translated)
     if result and result[-1] not in "。！？":
         result += "。"
     return result
 
 
-def _normalize_identifier(value: str) -> str:
-    normalized = re.sub(r"\s+", "_", value.strip())
-    return re.sub(r"^t_?phy_", "t_phy_", normalized, flags=re.I)
+def _apply_sentence_templates(text: str, corpus: TranslationCorpus) -> dict[str, Any] | None:
+    stripped = text.strip()
+    for template in corpus.sentence_templates():
+        match = template["pattern"].fullmatch(stripped)
+        if not match:
+            continue
+        rendered = template["render"](match)
+        if rendered is not None:
+            return rendered
+    return None
 
 
-def _translate_timing_parameter_definition(text: str) -> dict[str, Any] | None:
-    match = _TIMING_PARAMETER_DEFINITION.fullmatch(text.strip())
-    if not match:
-        return None
-    parameter = _normalize_identifier(match.group("parameter"))
-    signal = match.group("signal")
-    authority = match.group("authority")
-    first = f"切换由 {signal} 信号驱动的目标片选时，命令之间所需的最少附加数据时钟数"
-    second = f"按照 {authority} 的要求切换目标片选时，命令之间的最小附加延迟"
-    return {
-        "text": f"{parameter} 时序参数规定了{first}；同时还规定了{second}。",
-        "clauses": [
-            {"clause_id": "semantic-1", "label": "第一项规定", "text": first + "。"},
-            {"clause_id": "semantic-2", "label": "并列规定", "text": second + "。"},
-        ],
-    }
-
-
-def translate_sentence(parsed: Any, glossary: Any) -> dict[str, Any]:
+def translate_sentence(parsed: Any, glossary: Any, corpus: TranslationCorpus | None = None) -> dict[str, Any]:
     """返回完整译文和逐分句译文，供 schema v3 的分析栏展示。"""
-    repaired = _translate_timing_parameter_definition(parsed.text)
+    if corpus is None:
+        corpus = default_corpus()
+    repaired = _apply_sentence_templates(parsed.text, corpus)
     if repaired:
         text = repaired["text"]
         clauses = repaired["clauses"]
     else:
-        text = translate_text(parsed.text, glossary)
+        text = translate_text(parsed.text, glossary, corpus)
         clauses = []
         visible = [
             clause for clause in sorted(parsed.clauses, key=lambda item: item.order)
@@ -240,7 +180,7 @@ def translate_sentence(parsed: Any, glossary: Any) -> dict[str, Any]:
             clauses.append({
                 "clause_id": clause.id,
                 "label": getattr(clause, "label", "结构片段"),
-                "text": translate_text(clause.text, glossary),
+                "text": translate_text(clause.text, glossary, corpus),
             })
     return {
         "text": text,

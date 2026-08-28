@@ -13,6 +13,7 @@ from parse.clauser import parse_sentence, split_sentences
 from parse.glossary import Glossary
 from parse.complex_words import ComplexWordTable, extract_complex_words
 from parse.translator import translate_sentence, translate_text
+from parse.translation_corpus import BUILTIN_PHRASES, TranslationCorpus
 from parse import spacy_worker
 import parse.online_dict as online_dict
 import parse.spacy_parser as spacy_parser
@@ -564,6 +565,47 @@ class ApiTests(unittest.TestCase):
                 self.assertNotIn(document_key, json.loads(server._bookmarks_path.read_text(encoding="utf-8")))
         finally:
             server._bookmarks_path = old_path
+
+
+class TranslationCorpusTests(unittest.TestCase):
+    def test_user_corpus_extends_phrases_and_words(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "translation_corpus.json"
+            path.write_text(
+                json.dumps({
+                    "phrases": {"the arbiter grants ownership": "仲裁器授予总线使用权"},
+                    "words": {"quiesce": "静默"},
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            corpus = TranslationCorpus(path)
+            self.assertIn(
+                "仲裁器授予总线使用权",
+                translate_text("The arbiter grants ownership of the bus.", Glossary(), corpus),
+            )
+            # 术语表未收录的词走用户语料
+            self.assertIn("静默", translate_text("The controller must quiesce the bus.", Glossary(), corpus))
+            # 内置短语仍然兜底
+            self.assertIn("上升沿", translate_text("at the rising edge", Glossary(), corpus))
+
+    def test_malformed_user_corpus_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "translation_corpus.json"
+            path.write_text("{ not valid json", encoding="utf-8")
+            corpus = TranslationCorpus(path)
+            self.assertEqual(corpus.phrases, BUILTIN_PHRASES)
+            self.assertEqual(corpus.words, {})
+
+    def test_corpus_hot_reload_on_file_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "translation_corpus.json"
+            path.write_text(json.dumps({"words": {"quiesce": "静默"}}, ensure_ascii=False), encoding="utf-8")
+            corpus = TranslationCorpus(path)
+            self.assertEqual(corpus.words.get("quiesce"), "静默")
+            path.write_text(json.dumps({"words": {"quiesce": "停顿"}}, ensure_ascii=False), encoding="utf-8")
+            self.assertTrue(corpus.refresh_if_changed())
+            self.assertEqual(corpus.words.get("quiesce"), "停顿")
+            self.assertFalse(corpus.refresh_if_changed())
 
 
 class ParseIsolationTests(unittest.TestCase):

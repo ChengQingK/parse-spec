@@ -63,6 +63,7 @@ from parse import spacy_worker
 from parse.complex_words import BUILTIN as COMPLEX_WORD_BUILTIN, ComplexWordTable, extract_complex_words, lemma_for_word
 from parse.glossary import BUILTIN as GLOSSARY_BUILTIN, Glossary
 from parse.online_dict import OnlineDictionary
+from parse.translation_corpus import default_corpus
 from parse.translator import lookup_word_translation, translate_sentence
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -179,6 +180,12 @@ def _current_complex_words_signature() -> tuple[int, int] | None:
         return stat.st_mtime_ns, stat.st_size
     except OSError:
         return None
+
+
+def _refresh_translation_corpus_if_changed() -> None:
+    """translation_corpus.json 变更后重载语料，并清除包含旧译文的缓存。"""
+    if default_corpus().refresh_if_changed():
+        _analyze_sentence.cache_clear()
 
 
 def _refresh_complex_words_if_changed() -> None:
@@ -419,6 +426,7 @@ def analyze():
         return jsonify({"error": f"单句不能超过 {MAX_SENTENCE_CHARS} 个字符"}), 400
     _refresh_glossary_if_changed()
     _refresh_complex_words_if_changed()
+    _refresh_translation_corpus_if_changed()
     results = [_analyze_sentence(s.strip()) for s in sentences]
     return jsonify({"results": results})
 
