@@ -19,8 +19,15 @@ node_modules/
 backups/glossary/*.json
 word_cache.json
 
+# 用户本地数据：书签与自定义词表只存在于个人工作区，不入库
+/bookmarks.json
+/glossary.json
+/complex_words.json
+
 # 编辑器 / 操作系统
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+
+.mimosa
