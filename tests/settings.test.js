@@ -56,7 +56,7 @@ class FakeElement {
 
 function resultFor(text) {
   return {
-    schema_version: 2,
+    schema_version: 3,
     text,
     engine: 'spacy',
     main_clause_id: 'c0',

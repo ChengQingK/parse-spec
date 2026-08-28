@@ -71,7 +71,7 @@ function responseFor(text) {
     status: 200,
     json: async () => ({
       results: [{
-        schema_version: 2,
+        schema_version: 3,
         text,
         engine: "spacy",
         main_clause_id: "c0",
@@ -92,6 +92,7 @@ function responseFor(text) {
           warnings: [],
         }],
         terms: [],
+        complex_words: [],
         translation: null,
         warnings: [],
       }],
@@ -388,7 +389,7 @@ test("结构树展示逻辑关系且不拼接重复引导词", () => {
   const { context, elements } = loadViewer();
   const text = "Although the transfer is initiated, the data is not sampled until the arbiter grants ownership.";
   context.renderAnalysisPanel({ pageNum: 2, sentenceIndex: 3, text }, {
-    schema_version: 2,
+    schema_version: 3,
     text,
     engine: "spacy",
     main_clause_id: "c0",
