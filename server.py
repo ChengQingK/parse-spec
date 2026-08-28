@@ -58,7 +58,6 @@ except ModuleNotFoundError as exc:
             raise SystemExit(130) from None
     os.execv(str(project_python), command)
 
-from parse.clauser import parse_sentence
 from parse import spacy_worker
 from parse.complex_words import BUILTIN as COMPLEX_WORD_BUILTIN, ComplexWordTable, extract_complex_words, lemma_for_word
 from parse.glossary import BUILTIN as GLOSSARY_BUILTIN, Glossary
