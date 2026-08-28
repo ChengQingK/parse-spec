@@ -14,6 +14,7 @@ function ensureBrowserScriptsLoaded() {
   require("../../static/viewer_sentences.js");
   require("../../static/viewer_marks.js");
   require("../../static/viewer_pages.js");
+  require("../../static/viewer_hits.js");
   require("../../static/viewer.js");
   loaded = true;
 }
