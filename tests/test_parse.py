@@ -54,6 +54,26 @@ class ParseQaTests(unittest.TestCase):
         self.assertTrue(qa["suspicious"])
         self.assertTrue(any("分号" in signal for signal in qa["strong"]))
 
+    def test_sentence_initial_adverb_is_not_flagged(self):
+        parsed = self._single_clause("However, the requirement is based on system trade-offs.")
+        qa = parse_qa.assess(parsed.text, parsed)
+        self.assertFalse(qa["suspicious"])
+
+    def test_instead_of_phrase_is_not_flagged(self):
+        parsed = self._single_clause("The device must report 011b instead of 001b in this case.")
+        qa = parse_qa.assess(parsed.text, parsed)
+        self.assertFalse(qa["suspicious"])
+
+    def test_or_otherwise_phrase_is_not_flagged(self):
+        parsed = self._single_clause("No license, express, implied or otherwise, is granted to the licensee.")
+        qa = parse_qa.assess(parsed.text, parsed)
+        self.assertFalse(qa["suspicious"])
+
+    def test_mid_sentence_adverb_after_comma_is_flagged(self):
+        parsed = self._single_clause("The value is latched, however the clock keeps running.")
+        qa = parse_qa.assess(parsed.text, parsed)
+        self.assertTrue(qa["suspicious"])
+
     def test_weak_signals_alone_do_not_trigger_suspicious(self):
         parsed = self._single_clause("The register stays valid.")
         parsed.clauses[0].grammar.subject = ""
@@ -103,6 +123,11 @@ class ConjunctiveAdverbRerankTests(unittest.TestCase):
         self.assertIn(parsed.qa["strategy"], {"base", "multiroot", "conjadv", "auto"})
         self.assertFalse(parsed.qa["suspicious"])
         self.assertEqual(parsed.clauses[0].id, parsed.main_clause_id)
+
+    def test_symbol_verb_and_marked_clause_do_not_trigger_core_signal(self):
+        # "=" 不是主谓核心、when 从句核心不参与计数，该句不应被判可疑。
+        parsed = parse_sentence("NOTE 4 MR13 OP4 RRO bit is valid only when MR0 OP0 = 1.")
+        self.assertFalse(parsed.qa["suspicious"])
 
 
 class CorpusRegressionTests(unittest.TestCase):
