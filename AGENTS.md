@@ -34,6 +34,7 @@
 - `_grammar`：为每个分句独立提取主语、谓语、宾语、被动执行者、补语、语态、否定和情态。`_phrase` 默认把 `conj`/`cc` 一并纳入（“The DFI signals and the device” 完整显示），定语从句的先行词与缩略定语从句自身主语除外（只取中心名词）。
 - `_marker` / `_relation`：结合依存标签和连接词映射 `main/concession/condition/time/cause/purpose/result/relative/content/complement/basis/means/ambiguous`；不定式目的状语 "To do ..." 的 to 是 aux/TO 依存（不是 mark），同样识别为 `purpose`；多义连接词返回警告。
 - 模块间使用延迟导入避免循环依赖；`spacy_parser` 顶层不运行时 import `clauser`。
+- **解析质检层（2026-08-29）**：`parse/parse_qa.py` 对构建完成的分句树做确定性"判卷"——强信号（任一命中即判可疑）：句级连接副词（however/therefore/otherwise 等 13 词）无对应分句边界、模型切出多段独立句根（多个 ROOT）只产出一个分句、含分号未拆并列、单一分句内 ≥2 个"名词主语+限定动词"核心；弱信号（仅累计）：主句主干缺失、ambiguous 分句过多。`parse_spacy` 先构建基础树，判可疑时依次用 `multiroot`（多段独立句根提升）/`conjadv`（连接副词谓语提升为分句）/`auto` 候选策略重建，选强信号更少的树（平局保持原树）；仍可疑则在 warnings 追加"解析存疑"。连接副词关系映射：however/nevertheless/nonetheless/instead/still→concession，therefore/thus/hence/consequently/accordingly→result，otherwise→condition，moreover/furthermore/meanwhile→ambiguous（带提示）。`_nearest_clause_parent` 对自指根（head 指向自身）返回主句，避免额外句根自指。语料回归：`tests/corpus/spec_sentences.jsonl`，跑批 `python scripts/parse_corpus.py [--model en_core_web_trf] [--strict]`；新坏句子先以宽松期望入库，规则修复后收紧，保证每次迭代的影响面在整份语料上可见。
 
 ## 架构与数据流
 
@@ -132,12 +133,13 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
     "terms": [{ "word": "...", "pos": "...", "zh": "...", "note": "..." }],
     "complex_words": [{ "word": "...", "lemma": "...", "zh": "...", "level": "较难" }],
     "translation": { "text": "...", "engine": "structured-local", "clauses": [], "warnings": [] },
-    "warnings": []
+    "warnings": [],
+    "qa": { "suspicious": false, "signals": [], "strategy": "base" }
   }]
 }
 ```
 
-`translation` 由完全离线的结构翻译器生成，属于辅助译文而非生成式模型输出；`terms`、`complex_words` 和 `warnings` 可能为空数组。复杂词由 `parse/complex_words.py` 的内置阅读词表、项目根目录 `complex_words.json` 的用户词表及 spaCy lemma 共同识别。`/api/refine` 返回的 `result` 与本契约同构，额外带 `refined_by` 字段。
+`translation` 由完全离线的结构翻译器生成，属于辅助译文而非生成式模型输出；`terms`、`complex_words` 和 `warnings` 可能为空数组。复杂词由 `parse/complex_words.py` 的内置阅读词表、项目根目录 `complex_words.json` 的用户词表及 spaCy lemma 共同识别。`qa` 是解析质检层的判卷结果（`suspicious` 为 true 时前端显示"解析存疑"徽标并提示复核）。`/api/refine` 返回的 `result` 与本契约同构，额外带 `refined_by` 字段。
 
 ## 已知坑
 
@@ -155,6 +157,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - 2026-08-29（续 2）：展示层引号标题折叠（选定方案A，展示不变数据）——`viewer_sidebar.js` 新增 `foldLongQuotedTitles`/`foldedClauseHtml`，嵌套树节点、聚焦卡、联动树节点与简洁模式核心命题卡中超长引号标题（>24 字符且 >6 词）折叠为 `“前 6 词 …”`，折叠节点带 `title` 全文悬停展开；原句卡片、原文联动高亮与 `segments` 不变。解析层遮蔽（方案B）经实测在 trf 下无任何输出差异，未采用。
 - 2026-08-29（续 3）：修复非 100% 缩放下目录跳转错位——`navigatePdfDestination` 原先累加 `offsetTop` 计算滚动目标，CSS zoom ≠ 1 时其单位与 `scrollTop` 不一致（zoom=1 时恰好重合，故仅非 100% 缩放异常）；改用 `getBoundingClientRect` 相对坐标（与 `scrollTop` 同属滚动容器可视坐标系），页内坐标仍乘缩放倍率。静态资源缓存由 `max-age=86400` 改为 `no-cache`（ETag 协商），前端更新立即生效。示例 PDF 扩为 4 页 + 目录书签，新增 e2e 回归“110% 缩放下目录跳转准确落点”（落点容差 60px，页码状态同步断言）。测试数 65（Python）+ 47（Node）+ 5（e2e）。
 - 2026-08-29（续 4）：UI 风格系统化整改——①三份 CSS 全量令牌化：组件样式一律消费令牌、不再写死颜色，布局（可停靠网格、拖拽隔离）统一归 `style.css`，`settings.css` 退化为 dark/eye 两套纯变量重定义（关系色同步提亮适配暗色），删除两文件互相覆盖的死规则（旧移动端底部抽屉、opacity 收起过渡）；②新增设计尺度：圆角 5 档、阴影 3 档、字号 8 档（最小 11px，原 9/10px 小字全部上调），13 处硬编码主题蓝 `rgba(49,95,207,…)` 改用 `color-mix` 跟随 `--accent`，关系徽章底色/文字由 `--clause-color` 统一派生；③移除与手动主题冲突的 `prefers-color-scheme` `--danger` 覆盖，danger/error 随 `data-theme` 走，主按钮文字改用 `--panel` 保证暗色对比；④图标换内联 SVG（关闭/缩放/主题/空状态），关闭按钮统一圆形，主题按钮随主题切换太阳/月亮/眼睛图标；⑤新增弹窗入场动画与细滚动条（`prefers-reduced-motion` 全局兜底）。整改中 e2e 曾暴露重写丢失 `#pages` flex 布局规则导致目录跳转失效，已修复并做全量选择器审计。测试数不变（65 Python + 47 Node + 5 e2e）。
+- 2026-08-29（续 5）：解析质检层与候选重排序（把"判卷"能力编码进解析，替代逐句打补丁）——①新增 `parse/parse_qa.py`：对构建完成的分句树做确定性判卷，强信号（句级连接副词无边界 / 多段独立句根只出一个分句 / 分号未拆并列 / 单分句多主谓核心）判可疑，弱信号（主干缺失、ambiguous 密集）仅累计；②`parse_spacy` 重构出 `_build_tree` 策略构建器：基础树判可疑后依次用 `multiroot`（逗号+连接副词被模型切段时的多 ROOT 提升，main 取第一段）/`conjadv`（however 类谓语提升为分句）/`auto` 重建，选强信号更少的树，平局保持原树；`_marker`/`_relation` 认识连接副词映射（however→concession、therefore/thus→result、otherwise→condition、moreover→ambiguous+提示）；③`_nearest_clause_parent` 对自指根返回主句，修复额外句根的父子自指与 segments 全句重叠；④`ParsedSentence` 新增 `qa` 字段并随 `/api/analyze` 返回（schema v3 增量），前端在句元信息区显示"解析存疑"警示徽标（title 携带信号明细）；⑤语料回归机制：`tests/corpus/spec_sentences.jsonl`（DFI however 句为 trf 门控首条）+ `scripts/parse_corpus.py [--model] [--strict]` 跑批比对关系/标记/质检序列，sm 与 trf 双跑全过；新坏句子入库后按"宽松期望→规则修复→收紧期望"迭代。DFI 2.3.3 "In Mux mode, dfi_2n_mode = 'b0 … however …" 由单主句修复为主句+让步从句（标记 however，边界不重叠）。测试数 73（Python）+ 48（Node）+ 5（e2e）。
 
 - 2026-08-29：全面工程化整改（源自全面分析报告的 8 项路线）——①消除热路径双重 spaCy 解析（`ParsedSentence.lemma_spans` 透传给复杂词识别）；②`bookmarks/glossary/complex_words` 三份用户数据 JSON 出库并加入 `.gitignore`；③新增 GitHub Actions CI（Python 双平台 + npm test）；④新增 `parse/spacy_worker.py` 隔离工作进程，`PARSE_SPEC_PARSE_TIMEOUT` 限时、超时自动降级规则引擎；⑤`viewer.js` 重构为 `createViewer` 工厂并拆分出 `viewer_sentences.js`/`viewer_marks.js`/`viewer_pages.js`/`viewer_hits.js`/`viewer_sidebar.js`（虚拟化管线状态内聚、命中映射与侧栏依赖注入），Node 测试基建移除全部 vm 动态执行（新 `tests/helpers/browser_sandbox.js`）；⑥修复 `wireTextLayer` 高倍缩放下歧义 span 判别失准；⑦翻译层语料化：新增 `parse/translation_corpus.py`（内置短语/模板列表 + 可选用户 `translation_corpus.json`，签名热重载并清除分析缓存），`translator.py` 改为消费语料层的纯引擎；⑧新增 Playwright e2e（`npm run test:e2e`，真实浏览器覆盖加载/点击解析/主题/Esc）。另：`online_dict` 增加 https + 预期词典主机校验与重定向守卫，缓存写合并；`server.py` 增加 Host 白名单；单词校验收紧；词典模块日志统一；CI YAML 经 js-yaml 结构校验。测试数 51（Python）+ 46（Node）+ 4（e2e）。
 - 2026-08-28：在线词典多源化——`parse/online_dict.py` 从单一 dictionaryapi.dev 改为多源查询：有道（youdao jsonapi）优先、dictionaryapi.dev 回退，单源网络失败熔断跳过 30 分钟，`PARSE_SPEC_DICT_SOURCES` 可调顺序；响应新增在线中文释义（`zh_gloss`）与双语例句（`examples`）字段并在词详情区展示。`/api/complex-words/suggest` 在本地三级源均未命中时，用在线中文释义（去词性前缀）兜底自动填表。背景：dictionaryapi.dev 在境内长期直连超时，导致右击词典详情几乎总是 404。

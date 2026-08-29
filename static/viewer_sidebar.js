@@ -1027,6 +1027,10 @@
       const refineBadge = result.refined_by
         ? `<span class="engine-badge refine-badge" title="分句树由在线模型精修，本地解析仍即时可用">在线精修 · ${esc(result.refined_by)}</span>`
         : "";
+      const qaSignals = (result.qa && Array.isArray(result.qa.signals)) ? result.qa.signals.join("；") : "";
+      const qaBadge = result.qa && result.qa.suspicious
+        ? `<span class="engine-badge qa-badge" title="解析质检发现可疑信号：${esc(qaSignals)}">解析存疑</span>`
+        : "";
       const structureLabel = structureView === "linked" ? "原文联动树" : "嵌套原文";
       const logicSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">逻辑结构 · ${structureLabel}</h3>${structureHtml}</section>`;
       const termsSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">复杂词</h3>${complexWordsHtml || '<div class="empty-copy">本句没有识别到较难的通用单词</div>'}<h3 class="section-heading term-heading">术语</h3>${termsHtml}</section>`;
@@ -1034,7 +1038,7 @@
 
       analysisContent.innerHTML = `<div class="sentence-meta">
       <span>${targetLocationText(target)}</span>
-      <span class="meta-badges"><span class="depth-badge">${depthText(depth)}</span><span class="engine-badge">${engineName}</span>${refineBadge}</span>
+      <span class="meta-badges"><span class="depth-badge">${depthText(depth)}</span><span class="engine-badge">${engineName}</span>${refineBadge}${qaBadge}</span>
     </div>
     <div class="source-card"><p class="source-text" id="panel-source-text">${esc(result.text || target.text)}</p><div class="source-context-hint">右击原文中的英文单词，可加入复杂词表</div></div>
     ${translationHtml}${conciseCore}${logicSection}

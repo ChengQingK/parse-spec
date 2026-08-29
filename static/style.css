@@ -700,6 +700,12 @@ body.is-resizing-y .document-pane { pointer-events:none; }
   color: var(--condition);
 }
 
+/* 解析存疑徽标：警示色，提示该句质检未通过需人工复核 */
+.engine-badge.qa-badge {
+  background: var(--warning);
+  color: var(--warning-ink);
+}
+
 .depth-badge {
   display: inline-flex;
   align-items: center;

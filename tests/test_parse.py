@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import importlib.util
 import json
 from pathlib import Path
 import tempfile
@@ -9,7 +10,8 @@ import urllib.error
 import urllib.request
 from unittest.mock import patch
 
-from parse.clauser import parse_sentence, split_sentences
+from parse import parse_qa
+from parse.clauser import ClauseNode, Grammar, ParsedSentence, parse_sentence, split_sentences
 from parse.glossary import Glossary
 from parse.complex_words import ComplexWordTable, extract_complex_words
 from parse.translator import translate_sentence, translate_text
@@ -18,6 +20,111 @@ from parse import spacy_worker
 import parse.online_dict as online_dict
 import parse.spacy_parser as spacy_parser
 import server
+
+
+class ParseQaTests(unittest.TestCase):
+    """质检层判卷单元测试：手工构造分句树，不依赖具体模型行为。"""
+
+    @staticmethod
+    def _single_clause(text: str, relation: str = "main", marker: str = "") -> ParsedSentence:
+        clause = ClauseNode(
+            id="c0", parent_id=None, order=0, text=text, start=0, end=len(text),
+            segments=[(0, len(text))], kind="main", relation=relation, label="核心命题",
+            marker=marker, grammar=Grammar(subject="the register", predicate="is latched"),
+        )
+        return ParsedSentence(text=text, clauses=[clause], main_clause_id="c0", engine="spacy")
+
+    def test_conj_adverb_without_boundary_is_strong_signal(self):
+        parsed = self._single_clause("The value is latched, however the clock keeps running.")
+        qa = parse_qa.assess(parsed.text, parsed)
+        self.assertTrue(qa["suspicious"])
+        self.assertTrue(any("however" in signal for signal in qa["strong"]))
+
+    def test_conj_adverb_with_boundary_is_not_flagged(self):
+        parsed = self._single_clause(
+            "The value is latched, however the clock keeps running.",
+            relation="concession", marker="however",
+        )
+        qa = parse_qa.assess(parsed.text, parsed)
+        self.assertFalse(any("however" in signal for signal in qa["strong"]))
+
+    def test_semicolon_without_split_is_strong_signal(self):
+        parsed = self._single_clause("Mode A is selected; mode B is reserved.")
+        qa = parse_qa.assess(parsed.text, parsed)
+        self.assertTrue(qa["suspicious"])
+        self.assertTrue(any("分号" in signal for signal in qa["strong"]))
+
+    def test_weak_signals_alone_do_not_trigger_suspicious(self):
+        parsed = self._single_clause("The register stays valid.")
+        parsed.clauses[0].grammar.subject = ""
+        qa = parse_qa.assess(parsed.text, parsed)
+        self.assertFalse(qa["suspicious"])
+        self.assertTrue(qa["weak"])
+
+    def test_better_prefers_fewer_strong_signals_and_keeps_ties(self):
+        self.assertTrue(parse_qa.better({"strong": ["x"], "weak": []}, {"strong": [], "weak": ["y"]}))
+        self.assertFalse(parse_qa.better({"strong": [], "weak": []}, {"strong": [], "weak": ["z"]}))
+        self.assertFalse(parse_qa.better({"strong": ["x"], "weak": []}, {"strong": ["y"], "weak": []}))
+
+
+class ConjunctiveAdverbRerankTests(unittest.TestCase):
+    """however 家族回归：多重句根 + 连接副词边界候选策略。"""
+
+    DFI_MUX_SENTENCE = (
+        "In Mux mode, dfi_2n_mode = \u2019b0 in both 1N and 2N mode, however in 1N mode "
+        "dfi_cmd_freq_ratio equals dfi_data_freq_ratio and in 2N mode dfi_cmd_freq_ratio "
+        "is half of dfi_data_freq_ratio."
+    )
+
+    def test_however_clause_splits_under_trf(self):
+        import spacy
+
+        if importlib.util.find_spec("en_core_web_trf") is None:
+            self.skipTest("需要可选的 en_core_web_trf 模型")
+        trf = spacy.load("en_core_web_trf")
+        with patch.object(spacy_parser, "_NLP", trf), patch.object(spacy_parser, "_SPACY_OK", True):
+            parsed = spacy_parser.parse_spacy(self.DFI_MUX_SENTENCE)
+        self.assertIsNotNone(parsed)
+        self.assertEqual([clause.relation for clause in parsed.clauses], ["main", "concession"])
+        self.assertFalse(parsed.qa["suspicious"])
+        self.assertEqual(parsed.qa["strategy"], "multiroot")
+        main, concession = parsed.clauses
+        self.assertNotIn("however", main.text)
+        self.assertTrue(concession.text.startswith("however"))
+        self.assertEqual(concession.marker.lower(), "however")
+        self.assertEqual(concession.parent_id, main.id)
+        self.assertLessEqual(main.segments[0][1], concession.segments[0][0])
+
+    def test_parse_sentence_attaches_qa_metadata(self):
+        parsed = parse_sentence(
+            "The write data, which is driven by the controller, is latched into the destination register."
+        )
+        self.assertIsInstance(parsed.qa, dict)
+        self.assertIn(parsed.qa["strategy"], {"base", "multiroot", "conjadv", "auto"})
+        self.assertFalse(parsed.qa["suspicious"])
+        self.assertEqual(parsed.clauses[0].id, parsed.main_clause_id)
+
+
+class CorpusRegressionTests(unittest.TestCase):
+    """语料回归：默认模型链下逐条验证 tests/corpus/spec_sentences.jsonl。"""
+
+    def test_default_model_entries_match_expectations(self):
+        script_path = Path(__file__).resolve().parent.parent / "scripts" / "parse_corpus.py"
+        spec = importlib.util.spec_from_file_location("parse_corpus", script_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        failures: list[str] = []
+        checked = 0
+        for entry in module.load_entries(module.DEFAULT_CORPUS):
+            if entry.get("model"):
+                continue  # 指定模型的条目由 trf 门控测试或脚本 --model 覆盖
+            parsed = parse_sentence(entry["text"])
+            diffs = module.evaluate(parsed, entry)
+            checked += 1
+            if diffs:
+                failures.append(f"{entry['id']}: {'；'.join(diffs)}")
+        self.assertGreater(checked, 0)
+        self.assertEqual(failures, [])
 
 
 class _NullOnlineDict:
@@ -300,9 +407,12 @@ class ApiTests(unittest.TestCase):
                 "complex_words",
                 "translation",
                 "warnings",
+                "qa",
             },
         )
         self.assertEqual(result["schema_version"], 3)
+        self.assertIsInstance(result["qa"], dict)
+        self.assertIn("suspicious", result["qa"])
         self.assertEqual(result["translation"]["engine"], "structured-local")
         self.assertTrue(result["translation"]["text"])
         self.assertTrue(result["translation"]["clauses"])

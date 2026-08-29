@@ -334,6 +334,21 @@ test('解析程度三档控制内容密度', () => {
   assert.match(els['analysis-content'].innerHTML, /中文翻译/);
 });
 
+test('解析存疑徽标随 qa 结果展示并携带信号提示', () => {
+  const { context, els } = loadViewer();
+  const target = { key: '1:0', pageNum: 1, sentenceIndex: 0, text: 'The data is sampled when ready.', spans: [] };
+  const result = resultFor(target.text);
+
+  context.renderAnalysisPanel(target, result);
+  assert.doesNotMatch(els['analysis-content'].innerHTML, /解析存疑/);
+
+  result.qa = { suspicious: true, signals: ['连接副词 “however” 在句中但没有对应的分句边界'], strategy: 'base' };
+  context.renderAnalysisPanel(target, result);
+  assert.match(els['analysis-content'].innerHTML, /解析存疑/);
+  assert.match(els['analysis-content'].innerHTML, /qa-badge/);
+  assert.match(els['analysis-content'].innerHTML, /however/);
+});
+
 test('目录与固定右侧分析栏保持独立', () => {
   const { context, els } = loadViewer({ preset: { theme: 'light', analysisDepth: 'standard' } });
   context.setOutlineOpen(true);

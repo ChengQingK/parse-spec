@@ -71,6 +71,9 @@ class ParsedSentence:
     lemma_spans: list[tuple[int, int, str]] = field(default_factory=list, repr=False)
     # 非空表示分句树由该在线模型精修过（本地解析始终即时返回，精修是可选增强层）。
     refined_by: str = ""
+    # 解析质检层（parse_qa）的判卷结果：{"suspicious", "signals", "strategy"}；
+    # suspicious 为真表示存在强信号，前端展示"解析存疑"徽标提示复核。
+    qa: dict | None = None
 
 
 @dataclass(slots=True)

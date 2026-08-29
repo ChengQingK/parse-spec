@@ -175,6 +175,8 @@ def _build_result(ps) -> dict:
     }
     if ps.refined_by:
         result["refined_by"] = ps.refined_by
+    if ps.qa:
+        result["qa"] = ps.qa
     return result
 
 

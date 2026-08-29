@@ -1,0 +1,6 @@
+# 解析回归语料：每行一条 JSON。带 model 的条目只在对应模型下运行。
+# expect.relations/markers 为期望的分句关系与标记序列；qa_suspicious 校验质检结果。
+{"id": "dfi-mux-however", "model": "en_core_web_trf", "text": "In Mux mode, dfi_2n_mode = ’b0 in both 1N and 2N mode, however in 1N mode dfi_cmd_freq_ratio equals dfi_data_freq_ratio and in 2N mode dfi_cmd_freq_ratio is half of dfi_data_freq_ratio.", "expect": {"relations": ["main", "concession"], "markers": ["", "however"], "qa_suspicious": false}}
+{"id": "concession-until-nested", "text": "Although the transfer is initiated at the falling edge, the data is not sampled by the slave until the arbiter grants ownership of the bus to the requester.", "expect": {"relations": ["main", "concession", "time"], "markers": ["", "although", "until"]}}
+{"id": "relative-latched", "text": "The write data, which is driven by the controller, is latched into the destination register.", "expect": {"relations": ["main", "relative"], "markers": ["", "which"]}}
+{"id": "by-means-fronted", "text": "By setting the enable bit, the software selects the operating mode.", "expect": {"relations": ["main", "means"], "markers": ["", "by"]}}

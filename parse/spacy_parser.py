@@ -7,6 +7,8 @@ import os
 import re
 from typing import TYPE_CHECKING, Any
 
+from . import parse_qa
+
 if TYPE_CHECKING:
     from .clauser import Grammar, ParsedSentence
 
@@ -125,7 +127,13 @@ def _fronted_clause_roots(doc: Any, main_root: Any) -> list[tuple[Any, str, str,
     return result
 
 
-def _main_root(doc: Any) -> Any | None:
+def _main_root(doc: Any, prefer_first_root: bool = False) -> Any | None:
+    # 模型把一句话切成多段（逗号+连接副词常见）时会出现多个 ROOT：
+    # 第一段就是主句，直接采用；单 ROOT 的小模型名词误标仍走修复链。
+    if prefer_first_root:
+        root_tokens = [token for token in doc if token.dep_ == "ROOT"]
+        if len(root_tokens) > 1:
+            return root_tokens[0]
     root = next((token for token in doc if token.dep_ == "ROOT"), None)
     if root is not None and root.pos_ in {"VERB", "AUX"}:
         return root
@@ -147,8 +155,8 @@ def _main_root(doc: Any) -> Any | None:
     )
 
 
-def _clause_roots(doc: Any, main_root: Any) -> list[Any]:
-    return [
+def _clause_roots(doc: Any, main_root: Any, strategy: str = "base") -> list[Any]:
+    roots = [
         token
         for token in doc
         if token.i != main_root.i and token.dep_.split(":", 1)[0] in _CLAUSE_DEPS
@@ -157,6 +165,31 @@ def _clause_roots(doc: Any, main_root: Any) -> list[Any]:
         and not _is_false_technical_acl(token)
         and not _is_spurious_as_adverbial(token)
     ]
+    if strategy in {"base"}:
+        return roots
+    # 候选策略：质检层判可疑后尝试的补充分句边界。只在主句子树内生效，
+    # 避免把定语从句内部的连接副词误提为顶级分句。
+    taken = {main_root.i, *(root.i for root in roots)}
+    if strategy in {"multiroot", "auto"}:
+        for token in doc:
+            if token.dep_ == "ROOT" and token.i not in taken:
+                roots.append(token)
+                taken.add(token.i)
+    if strategy in {"conjadv", "auto"}:
+        for token in doc:
+            head = token.head
+            if (
+                token.lower_ in parse_qa.CONJ_ADVERBS
+                and token.dep_.split(":", 1)[0] in {"advmod", "cc"}
+                and head.pos_ in {"VERB", "AUX"}
+                and head.i not in taken
+                and head.i != main_root.i
+                and head.dep_.split(":", 1)[0] not in _CLAUSE_DEPS
+                and _nearest_clause_parent(head, roots, main_root) is main_root
+            ):
+                roots.append(head)
+                taken.add(head.i)
+    return roots
 
 
 def _subtree_bounds(token: Any) -> tuple[int, int]:
@@ -172,6 +205,7 @@ def _marker(token: Any, source: str) -> str:
         child
         for child in token.children
         if child.dep_.split(":", 1)[0] == "mark" or child.lower_ in _REL_WORDS
+        or (child.lower_ in parse_qa.CONJ_ADVERBS and child.dep_.split(":", 1)[0] in {"advmod", "cc"})
     ]
     if not candidates:
         # 不定式目的状语 “To enable ...” 的 to 是 aux 依存，同样直接支配分句根。
@@ -197,6 +231,12 @@ def _relation(token: Any, marker: str) -> tuple[str, list[str]]:
         return "content", []
     if dep == "xcomp":
         return "complement", []
+    if lower in parse_qa.CONJ_ADVERBS:
+        # 句级连接副词：however 表转折、therefore/thus 表结果等。
+        relation = parse_qa.CONJ_ADVERBS[lower]
+        if relation is None:
+            return "ambiguous", [f"{marker} 仅表递进/补充，逻辑关系需结合语境确认"]
+        return relation, []
     if lower == "to":
         return "purpose", []
     if lower in {"although", "though", "even though"}:
@@ -223,6 +263,10 @@ def _relation(token: Any, marker: str) -> tuple[str, list[str]]:
 def _nearest_clause_parent(token: Any, roots: list[Any], main_root: Any, elevated_main: set[int] | None = None) -> Any:
     root_by_index = {item.i: item for item in roots}
     elevated_main = elevated_main or set()
+    # 多重句根策略下，额外 ROOT 的 head 指向自身；它与其余分句是并列关系，
+    # 就近父节点按主句处理，否则会自指并让 _is_descendant 判定失效。
+    if token.head.i == token.i:
+        return main_root
     current = token.head
     seen: set[int] = set()
     while current.i not in seen:
@@ -580,21 +624,9 @@ def _repaired_relative(doc: Any, source: str, main_root: Any) -> dict[str, Any] 
     }
 
 
-def parse_spacy(text: str) -> ParsedSentence | None:
-    """返回逻辑分句树；模型不可用时返回 ``None``。"""
-    from .clauser import ClauseNode, ParsedSentence
-
-    if not _SPACY_OK or _NLP is None:
-        return None
-    source = text.strip()
-    if not source:
-        return None
-    doc = _NLP(source)
-    main_root = _main_root(doc)
-    if main_root is None:
-        return None
-
-    roots = _clause_roots(doc, main_root)
+def _build_tree(doc: Any, source: str, main_root: Any, strategy: str, ClauseNode: Any, ParsedSentence: Any) -> "ParsedSentence":
+    """从同一份 doc 按给定策略构建分句树；策略只改变分句根集合，其余管线一致。"""
+    roots = _clause_roots(doc, main_root, strategy)
     fronted_roots = _fronted_clause_roots(doc, main_root)
     elevated_main = _elevated_main_conjuncts(doc, main_root)
     elevated_indexes = {token.i for token in elevated_main}
@@ -736,3 +768,49 @@ def parse_spacy(text: str) -> ParsedSentence | None:
             if token.is_alpha and not token.is_space
         ],
     )
+
+
+def parse_spacy(text: str) -> "ParsedSentence" | None:
+    """返回逻辑分句树；模型不可用时返回 ``None``。
+
+    质检层先给基础树"判卷"；判为可疑时套用候选拆分策略（多重句根 /
+    连接副词边界）重新构建，选择强信号更少的树；仍可疑则保留原树、
+    标注 "解析存疑" 警告，并在 qa 字段记录信号供前端展示与反馈。
+    """
+    from .clauser import ClauseNode, ParsedSentence
+
+    if not _SPACY_OK or _NLP is None:
+        return None
+    source = text.strip()
+    if not source:
+        return None
+    doc = _NLP(source)
+    main_root = _main_root(doc)
+    if main_root is None:
+        return None
+
+    parsed = _build_tree(doc, source, main_root, "base", ClauseNode, ParsedSentence)
+    qa = parse_qa.assess(source, parsed, doc)
+    strategy = "base"
+    if qa["suspicious"]:
+        for candidate in ("multiroot", "conjadv", "auto"):
+            candidate_root = (
+                main_root
+                if candidate == "conjadv"
+                else _main_root(doc, prefer_first_root=True)
+            )
+            if candidate_root is None:
+                continue
+            alt = _build_tree(doc, source, candidate_root, candidate, ClauseNode, ParsedSentence)
+            alt_qa = parse_qa.assess(source, alt, doc)
+            if parse_qa.better(qa, alt_qa):
+                parsed, qa, strategy = alt, alt_qa, candidate
+    if qa["suspicious"]:
+        still = "；".join([*qa["strong"], *qa["weak"]])
+        parsed.warnings.append(f"解析存疑：{still}。请结合原句核对，或通过反馈确认")
+    parsed.qa = {
+        "suspicious": qa["suspicious"],
+        "signals": [*qa["strong"], *qa["weak"]],
+        "strategy": strategy,
+    }
+    return parsed
