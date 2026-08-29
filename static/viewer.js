@@ -120,7 +120,12 @@ const VALID_DEPTHS = new Set(["concise", "standard", "detailed"]);
 const VALID_STRUCTURE_VIEWS = new Set(["bracket", "linked"]);
 const THEME_ORDER = ["light", "dark", "eye"];
 const THEME_LABELS = Object.freeze({ light: "浅色", dark: "暗色", eye: "护眼色" });
-const THEME_ICONS = Object.freeze({ light: "☀", dark: "☾", eye: "◐" });
+/* 主题图标用内联 SVG，随主题切换并保持跨平台渲染一致 */
+const THEME_ICONS = Object.freeze({
+  light: '<svg class="icon-sun" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="10" cy="10" r="3.4"/><path d="M10 2.2v2M10 15.8v2M2.2 10h2M15.8 10h2M4.6 4.6l1.4 1.4M14 14l1.4 1.4M15.4 4.6L14 6M6 14l-1.4 1.4"/></svg>',
+  dark: '<svg class="icon-moon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15.5 12.2A6.5 6.5 0 0 1 7.8 4.5a6.5 6.5 0 1 0 7.7 7.7Z"/></svg>',
+  eye: '<svg class="icon-eye" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 10s2.8-4.7 7.5-4.7S17.5 10 17.5 10s-2.8 4.7-7.5 4.7S2.5 10 2.5 10Z"/><circle cx="10" cy="10" r="2.1"/></svg>',
+});
 const sentenceResults = new Map();
 const pageSentenceTargets = new Map();
 
@@ -265,7 +270,7 @@ function setTheme(theme, persist = true) {
   const next = VALID_THEMES.has(theme) ? theme : DEFAULT_SETTINGS.theme;
   uiSettings.theme = next;
   if (document.documentElement && document.documentElement.dataset) document.documentElement.dataset.theme = next;
-  if (themeIcon) themeIcon.textContent = THEME_ICONS[next];
+  if (themeIcon) themeIcon.innerHTML = THEME_ICONS[next];
   if (themeCycle) {
     const nextTheme = THEME_ORDER[(THEME_ORDER.indexOf(next) + 1) % THEME_ORDER.length];
     themeCycle.setAttribute("aria-label", `当前为${THEME_LABELS[next]}主题，切换为${THEME_LABELS[nextTheme]}主题`);

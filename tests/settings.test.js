@@ -204,7 +204,7 @@ test('主题位于下栏，分析选项直接位于分析栏', () => {
   const { context, els, storage } = loadViewer();
   context.setTheme('dark');
   assert.equal(context.document.documentElement.dataset.theme, 'dark');
-  assert.equal(els['theme-icon'].textContent, '☾');
+  assert.match(els['theme-icon'].innerHTML, /icon-moon/);
   assert.match(els['theme-cycle'].getAttribute('aria-label'), /切换为护眼色主题/);
   els['theme-cycle'].emit('click');
   assert.equal(context.document.documentElement.dataset.theme, 'eye');
@@ -263,7 +263,7 @@ test('最近文档只保存在页面内存，顶栏仅渲染文件名', () => {
 test('分析栏固定右侧且只保留宽度调节', () => {
   const { els } = loadViewer();
   const html = fs.readFileSync(path.join(__dirname, '..', 'static', 'index.html'), 'utf8');
-  const css = fs.readFileSync(path.join(__dirname, '..', 'static', 'settings.css'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'static', 'style.css'), 'utf8');
   assert.equal(els['panel-resizer'].getAttribute('aria-orientation'), 'vertical');
   assert.doesNotMatch(html, /position-select|data-panel-position/);
   assert.doesNotMatch(css, /data-panel-position|panel-height/);
@@ -340,7 +340,7 @@ test('目录与固定右侧分析栏保持独立', () => {
   assert.equal(els['outline-panel'].hidden, false);
   assert.equal(els.workspace.classList.contains('outline-open'), true);
   assert.equal(els.workspace.classList.contains('panel-collapsed'), false);
-  assert.match(fs.readFileSync(path.join(__dirname, '..', 'static', 'settings.css'), 'utf8'), /outline nav-resizer doc resizer panel/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'static', 'style.css'), 'utf8'), /outline nav-resizer doc resizer panel/);
 });
 
 test('目录宽度可调整、受边界限制并持久化', () => {
@@ -388,8 +388,8 @@ test('侧栏拖动首个移动事件立即更新浮层，松手后才提交 PDF 
   flushAnimationFrames();
   flushAnimationFrames();
   assert.equal(els['outline-panel'].style.width, '');
-  assert.match(fs.readFileSync(path.join(__dirname, '..', 'static', 'settings.css'), 'utf8'), /\.analysis-panel\.is-live-resizing.*position:fixed!important/);
-  assert.doesNotMatch(fs.readFileSync(path.join(__dirname, '..', 'static', 'settings.css'), 'utf8'), /body\.is-resizing-[xy] \*/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'static', 'style.css'), 'utf8'), /\.analysis-panel\.is-live-resizing.*position:fixed!important/);
+  assert.doesNotMatch(fs.readFileSync(path.join(__dirname, '..', 'static', 'style.css'), 'utf8'), /body\.is-resizing-[xy] \*/);
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'static', 'style.css'), 'utf8'), /contain:\s*layout paint style/);
 });
 

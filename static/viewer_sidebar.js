@@ -666,7 +666,7 @@
 
     function renderEmptyPanel() {
       analysisContent.innerHTML = `<div class="panel-empty">
-    <span class="panel-empty-icon">↗</span>
+    <span class="panel-empty-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 14L14 6M7.5 6H14v6.5"/></svg></span>
     <h3>从 PDF 中选择一句话</h3>
     <p>悬停查看句子范围，单击锁定分析。解析方式和面板位置可在分析栏顶部直接调整。</p>
   </div>`;
