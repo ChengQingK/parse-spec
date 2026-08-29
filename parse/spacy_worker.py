@@ -149,3 +149,20 @@ def parse_isolated_or_direct(text: str):
     if result is not None:
         return result
     return fallback_parse(text, "隔离解析超时或工作进程不可用，已使用规则降级解析")
+
+
+def warmup(timeout_seconds: float | None = None) -> bool:
+    """预热工作进程并加载解析模型，避免首次点击承担模型加载耗时。
+
+    供服务启动后台线程调用；en_core_web_trf 等大模型加载可达十几秒，
+    预热期间临时放宽超时，结束后恢复原值。未开启隔离开时返回 False。
+    """
+    if not _enabled:
+        return False
+    global _timeout_seconds
+    original = _timeout_seconds
+    _timeout_seconds = float(timeout_seconds) if timeout_seconds else max(original, 60.0)
+    try:
+        return parse_isolated("Warm up the parser.") is not None
+    finally:
+        _timeout_seconds = original

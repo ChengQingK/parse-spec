@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -10,16 +11,37 @@ if TYPE_CHECKING:
     from .clauser import Grammar, ParsedSentence
 
 
-try:
-    import spacy
+_MODEL_ENV = "PARSE_SPEC_SPACY_MODEL"
+_DEFAULT_MODELS = ("en_core_web_sm",)
 
-    _NLP = spacy.load("en_core_web_sm", disable=["ner"])
-    _SPACY_OK = True
-    _SPACY_ERROR = ""
-except Exception as exc:
-    _NLP = None
-    _SPACY_OK = False
-    _SPACY_ERROR = f"{type(exc).__name__}: {exc}"
+
+def _model_candidates() -> list[str]:
+    """解析模型加载顺序：环境变量显式指定的模型优先，失败后回退默认链。"""
+    requested = os.environ.get(_MODEL_ENV, "").strip()
+    chain = [requested] if requested else []
+    for name in _DEFAULT_MODELS:
+        if name not in chain:
+            chain.append(name)
+    return chain
+
+
+_NLP = None
+_MODEL_NAME = ""
+_SPACY_OK = False
+_SPACY_ERROR = ""
+for _model_name in _model_candidates():
+    try:
+        import spacy
+
+        _NLP = spacy.load(_model_name, disable=["ner"])
+        _MODEL_NAME = _model_name
+        _SPACY_OK = True
+        _SPACY_ERROR = ""
+        break
+    except Exception as exc:
+        _NLP = None
+        _SPACY_OK = False
+        _SPACY_ERROR = f"{type(exc).__name__}: {exc}"
 
 
 _CLAUSE_DEPS = {"relcl", "advcl", "ccomp", "xcomp", "csubj", "acl"}
@@ -37,6 +59,7 @@ _LABELS = {
     "content": "内容从句",
     "complement": "补充说明",
     "basis": "依据要求",
+    "means": "方式手段",
     "ambiguous": "关系待确认",
 }
 
@@ -50,6 +73,56 @@ def _is_false_technical_acl(token: Any) -> bool:
         and token.head.pos_ in {"NOUN", "PROPN"}
         and any(child.lower_ in {"parameter", "parameters"} for child in token.children)
     )
+
+
+def _is_spurious_as_adverbial(token: Any) -> bool:
+    """识别 “treat as reserved” 里被误标成 advcl 的 “as + 分词” 补语。
+
+    真分句的 as 是 mark 依存（如 “as required by the PHY”，还带 agent）；
+    这里的 as 是 advmod/case 且从句无 mark、无主语、无执行者。
+    """
+    if token.dep_.split(":", 1)[0] != "advcl" or token.tag_ != "VBN":
+        return False
+    has_as_marker = any(
+        child.lower_ == "as" and child.dep_.split(":", 1)[0] in {"advmod", "case", "prep"}
+        for child in token.children
+    )
+    if not has_as_marker:
+        return False
+    has_mark = any(child.dep_.split(":", 1)[0] == "mark" for child in token.children)
+    has_subject = any(
+        child.dep_.split(":", 1)[0] in {"nsubj", "nsubjpass", "csubj"} for child in token.children
+    )
+    has_agent = any(
+        child.dep_.split(":", 1)[0] == "agent" or child.lower_ == "by" for child in token.children
+    )
+    return not has_mark and not has_subject and not has_agent
+
+
+def _fronted_clause_roots(doc: Any, main_root: Any) -> list[tuple[Any, str, str, Any, str]]:
+    """把 “By + 动名词” / “Based on + 名词” 等 prep 挂靠状语恢复为独立分句。
+
+    模型把它们统一标成主句谓语的 prep 短语，不会进入 _CLAUSE_DEPS，于是
+    “By setting the enable bit, ...” 的前半句永远留在主句里。返回
+    (状语根, 关系, 标志词, 语法提取根, 提示) 元组；前置与后置位置都生效。
+    """
+    result: list[tuple[Any, str, str, Any, str]] = []
+    for child in main_root.children:
+        if child.dep_.split(":", 1)[0] != "prep":
+            continue
+        pcomp = next(
+            (item for item in child.children if item.dep_.split(":", 1)[0] == "pcomp"),
+            None,
+        )
+        if child.lower_ == "by" and pcomp is not None and pcomp.tag_ == "VBG":
+            result.append(
+                (child, "means", "by", pcomp, "该方式状语由规则从 “by + 动名词” 结构识别")
+            )
+        elif child.tag_ == "VBN" and child.lower_ in {"based", "according", "depending"}:
+            result.append(
+                (child, "basis", child.text, child, "该依据状语由规则从 “based/according to + 名词” 结构识别")
+            )
+    return result
 
 
 def _main_root(doc: Any) -> Any | None:
@@ -82,6 +155,7 @@ def _clause_roots(doc: Any, main_root: Any) -> list[Any]:
         # en_core_web_sm 常把名词短语“signals, timing parameters”中的 timing
         # 误标成 advcl；该模式没有从句含义，不能从上级分句中剥离。
         and not _is_false_technical_acl(token)
+        and not _is_spurious_as_adverbial(token)
     ]
 
 
@@ -99,6 +173,11 @@ def _marker(token: Any, source: str) -> str:
         for child in token.children
         if child.dep_.split(":", 1)[0] == "mark" or child.lower_ in _REL_WORDS
     ]
+    if not candidates:
+        # 不定式目的状语 “To enable ...” 的 to 是 aux 依存，同样直接支配分句根。
+        candidates = [
+            child for child in token.children if child.dep_.split(":", 1)[0] == "aux" and child.tag_ == "TO"
+        ]
     if not candidates:
         return ""
     first = candidates[0]
@@ -118,6 +197,8 @@ def _relation(token: Any, marker: str) -> tuple[str, list[str]]:
         return "content", []
     if dep == "xcomp":
         return "complement", []
+    if lower == "to":
+        return "purpose", []
     if lower in {"although", "though", "even though"}:
         return "concession", []
     if lower in {"if", "unless", "even if", "provided", "providing"}:
@@ -262,12 +343,16 @@ def _display_text(source: str, segments: list[tuple[int, int]]) -> str:
     return " ".join(source[start:end].strip() for start, end in segments if source[start:end].strip())
 
 
-def _phrase(head: Any | None, include_prepositions: bool = False) -> str:
+def _phrase(head: Any | None, include_prepositions: bool = False, include_conjuncts: bool = True) -> str:
     if head is None:
         return ""
     allowed = {"det", "amod", "compound", "nummod", "poss", "case", "quantmod"}
     if include_prepositions:
         allowed |= {"prep", "pobj", "dative"}
+    if include_conjuncts:
+        # 并列短语（A and B）要连同 and/or 一起展示，否则“主语 The DFI signals
+        # and the device”只显示前半个并列项。
+        allowed |= {"conj", "cc"}
     tokens = [head]
     pending = [head]
     while pending:
@@ -389,7 +474,7 @@ def _grammar(root: Any, main_root: Any, owned_tokens: list[Any] | None = None) -
         for child in root.children
         if child.dep_.split(":", 1)[0] == "conj"
     ]
-    antecedent = _phrase(root.head) if root.dep_.split(":", 1)[0] in {"relcl", "acl"} and root.head.pos_ in {"NOUN", "PROPN"} else ""
+    antecedent = _phrase(root.head, include_conjuncts=False) if root.dep_.split(":", 1)[0] in {"relcl", "acl"} and root.head.pos_ in {"NOUN", "PROPN"} else ""
     direct_object = _phrase(direct_object_token, include_prepositions=True)
     complement = _phrase(complement_token, include_prepositions=True)
     if (
@@ -414,8 +499,16 @@ def _grammar(root: Any, main_root: Any, owned_tokens: list[Any] | None = None) -
     if rule_modal:
         checks.append(rule_modal.group(1).lower() in modal_lemmas)
     agreement = "corroborated" if all(checks) else "conflict"
+    # 缩略定语从句（无显式主语，回退到中心名词）的主语只是被修饰名词本身，
+    # 不应把同位并列的另一主语（and the device）也算进该从句。
+    reduced_relative = (
+        root.dep_.split(":", 1)[0] in {"relcl", "acl"}
+        and root.head.pos_ in {"NOUN", "PROPN"}
+        and subject_token is not None
+        and subject_token.i == root.head.i
+    )
     return Grammar(
-        subject=_phrase(subject_token),
+        subject=_phrase(subject_token, include_conjuncts=not reduced_relative),
         predicate=predicate,
         object=direct_object,
         agent=_phrase(agent_token),
@@ -502,17 +595,20 @@ def parse_spacy(text: str) -> ParsedSentence | None:
         return None
 
     roots = _clause_roots(doc, main_root)
+    fronted_roots = _fronted_clause_roots(doc, main_root)
     elevated_main = _elevated_main_conjuncts(doc, main_root)
     elevated_indexes = {token.i for token in elevated_main}
     repaired_relative = _repaired_relative(doc, source, main_root)
-    bounds = {root.i: _subtree_bounds(root) for root in roots}
-    roots.sort(key=lambda token: bounds[token.i])
+    # 规则恢复的前置状语与依存从句共用同一套编号、排除与父子判定。
+    all_roots = roots + [item[0] for item in fronted_roots]
+    bounds = {root.i: _subtree_bounds(root) for root in all_roots}
+    all_roots.sort(key=lambda token: bounds[token.i])
     root_ids = {main_root.i: "c0"}
-    root_ids.update({root.i: f"c{index}" for index, root in enumerate(roots, start=1)})
+    root_ids.update({root.i: f"c{index}" for index, root in enumerate(all_roots, start=1)})
 
-    main_tokens = _own_tokens(doc, main_root, roots, main_root, elevated_main)
+    main_tokens = _own_tokens(doc, main_root, all_roots, main_root, elevated_main)
     for conjunct in elevated_main:
-        main_tokens.extend(_elevated_tokens(doc, conjunct, roots, main_root, elevated_indexes))
+        main_tokens.extend(_elevated_tokens(doc, conjunct, all_roots, main_root, elevated_indexes))
     main_tokens = sorted({token.i: token for token in main_tokens}.values(), key=lambda token: token.i)
     if repaired_relative:
         main_tokens = [
@@ -524,7 +620,7 @@ def parse_spacy(text: str) -> ParsedSentence | None:
     main_grammar = _grammar(main_root, main_root, main_tokens)
     if elevated_main:
         main_grammar.coordination = [
-            _display_text(source, _segments(source, _elevated_tokens(doc, conjunct, roots, main_root, elevated_indexes)))
+            _display_text(source, _segments(source, _elevated_tokens(doc, conjunct, all_roots, main_root, elevated_indexes)))
             for conjunct in elevated_main
         ]
     if repaired_relative and main_grammar.object.lower() == repaired_relative["marker"].lower():
@@ -547,13 +643,40 @@ def parse_spacy(text: str) -> ParsedSentence | None:
         )
     ]
 
-    for root in roots:
+    fronted_by_index = {item[0].i: item for item in fronted_roots}
+    for root in all_roots:
         start, end = bounds[root.i]
+        own_tokens = _own_tokens(doc, root, all_roots, main_root, elevated_main)
+        own_segments = _segments(source, own_tokens)
+        if root.i in fronted_by_index:
+            relation, marker, grammar_root, note = fronted_by_index[root.i][1:]
+            clause_grammar = _grammar(grammar_root, main_root, own_tokens)
+            next_token = doc[root.i + 1] if root.i + 1 < len(doc) else None
+            if grammar_root is root and next_token is not None and next_token.lower_ in {"on", "to", "upon"}:
+                # “Based on” 的谓语补上介词，避免只显示孤立的分词。
+                clause_grammar.predicate = f"{root.text} {next_token.text}"
+            nodes.append(
+                ClauseNode(
+                    id=root_ids[root.i],
+                    parent_id="c0",
+                    order=min((token.i for token in root.subtree), default=root.i),
+                    text=_display_text(source, own_segments) or source[start:end].strip(" ,;"),
+                    start=start,
+                    end=end,
+                    segments=own_segments or [(start, end)],
+                    kind="advcl",
+                    relation=relation,
+                    label=_LABELS[relation],
+                    marker=marker,
+                    grammar=clause_grammar,
+                    confidence=0.75,
+                    warnings=[note],
+                )
+            )
+            continue
         marker = _marker(root, source)
         relation, warnings = _relation(root, marker)
-        parent_root = _nearest_clause_parent(root, roots, main_root, elevated_indexes)
-        own_tokens = _own_tokens(doc, root, roots, main_root, elevated_main)
-        own_segments = _segments(source, own_tokens)
+        parent_root = _nearest_clause_parent(root, all_roots, main_root, elevated_indexes)
         nodes.append(
             ClauseNode(
                 id=root_ids[root.i],
@@ -580,7 +703,7 @@ def parse_spacy(text: str) -> ParsedSentence | None:
     if repaired_relative:
         nodes.append(
             ClauseNode(
-                id=f"c{len(roots) + 1}",
+                id=f"c{len(all_roots) + 1}",
                 parent_id="c0",
                 order=repaired_relative["order"],
                 text=repaired_relative["text"],

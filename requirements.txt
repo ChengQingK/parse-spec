@@ -1,6 +1,14 @@
 # 运行环境：Python 3.11
 # en_core_web_sm 不在常用 PyPI 镜像中，仓库保留了离线 wheel：
 #   python -m pip install ./vendor/en_core_web_sm-3.8.0-py3-none-any.whl
+#
+# 可选：更强的解析模型 en_core_web_trf（依存精度更高，CPU 单句约几十毫秒）。
+# 运行 python scripts/fetch_models.py 下载并校验官方 wheel，然后按顺序安装
+# （torch 必须先于 spacy-transformers，否则 PyPI 默认拉取数 GB 的 CUDA 版 torch）：
+#   uv pip install --python .venv\Scripts\python.exe --index-url https://download.pytorch.org/whl/cpu torch --no-deps
+#   uv pip install --python .venv\Scripts\python.exe spacy-transformers
+#   uv pip install --python .venv\Scripts\python.exe vendor/en_core_web_trf-3.7.3-py3-none-any.whl
+# 安装后 python server.py 启动时自动启用；也可用 PARSE_SPEC_SPACY_MODEL 显式指定。
 
 flask>=3.0,<4
 reportlab>=4.0,<5

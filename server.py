@@ -14,6 +14,7 @@ import os
 import json
 import re
 import socket
+import threading
 from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -61,6 +62,7 @@ except ModuleNotFoundError as exc:
 from parse import spacy_worker
 from parse.complex_words import BUILTIN as COMPLEX_WORD_BUILTIN, ComplexWordTable, extract_complex_words, lemma_for_word
 from parse.glossary import BUILTIN as GLOSSARY_BUILTIN, Glossary
+from parse.llm_refine import LlmRefiner
 from parse.online_dict import OnlineDictionary
 from parse.translation_corpus import default_corpus
 from parse.translator import lookup_word_translation, translate_sentence
@@ -80,6 +82,8 @@ _complex_words_signature: tuple[int, int] | None = None
 _bookmarks_path = Path(BASE) / "bookmarks.json"
 _word_cache_path = Path(BASE) / "word_cache.json"
 _online_dict = OnlineDictionary(_word_cache_path)
+_parse_cache_path = Path(BASE) / "parse_cache.json"
+_llm_refiner = LlmRefiner(_parse_cache_path)
 MAX_SENTENCES = 32
 MAX_SENTENCE_CHARS = 10_000
 MAX_REQUEST_BYTES = 400_000
@@ -107,6 +111,26 @@ def _can_bind_local(port: int) -> bool:
         probe.close()
 
 
+def _prefer_trf_model() -> str:
+    """未显式指定解析模型时，若已安装 en_core_web_trf 则优先使用。
+
+    只影响 server 进程及其解析工作子进程（经环境变量传递）；测试与直接
+    导入 parse 的场景不受影响，仍然使用 en_core_web_sm 保证结果稳定。
+    返回最终生效的模型名。
+    """
+    if os.environ.get("PARSE_SPEC_SPACY_MODEL", "").strip():
+        return os.environ["PARSE_SPEC_SPACY_MODEL"].strip()
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("en_core_web_trf") and importlib.util.find_spec("spacy_transformers"):
+            os.environ["PARSE_SPEC_SPACY_MODEL"] = "en_core_web_trf"
+            return "en_core_web_trf"
+    except (ImportError, ValueError):
+        pass
+    return "en_core_web_sm"
+
+
 def _select_local_port() -> int:
     configured = os.environ.get("PARSE_SPEC_PORT", "").strip()
     if configured:
@@ -125,11 +149,8 @@ def _select_local_port() -> int:
     raise SystemExit("常用本地端口均无法绑定，请设置 PARSE_SPEC_PORT 后重试")
 
 
-@lru_cache(maxsize=1024)
-def _analyze_sentence(s: str) -> dict:
-    sentence = s.strip()
-    # 服务直接运行时解析在隔离工作进程中限时执行；测试与导入场景走同步路径。
-    ps = spacy_worker.parse_isolated_or_direct(sentence)
+def _build_result(ps) -> dict:
+    """把 ParsedSentence 转为 schema v3 响应（/api/analyze 与 /api/refine 共用）。"""
     # 优先使用 spaCy 的原始词形与 lemma；规则降级结果也提供同构候选词。
     words_hit = {}
     for tok, lemma in ps.term_candidates:
@@ -141,7 +162,7 @@ def _analyze_sentence(s: str) -> dict:
         if d and tok.lower() not in words_hit:
             words_hit[tok.lower()] = d
     words = sorted(words_hit.values(), key=lambda x: (x["pos"], x["word"]))
-    return {
+    result = {
         "schema_version": 3,
         "text": ps.text,
         "engine": ps.engine,
@@ -152,6 +173,17 @@ def _analyze_sentence(s: str) -> dict:
         "translation": translate_sentence(ps, _glossary),
         "warnings": ps.warnings,
     }
+    if ps.refined_by:
+        result["refined_by"] = ps.refined_by
+    return result
+
+
+@lru_cache(maxsize=1024)
+def _analyze_sentence(s: str) -> dict:
+    sentence = s.strip()
+    # 服务直接运行时解析在隔离工作进程中限时执行；测试与导入场景走同步路径。
+    ps = spacy_worker.parse_isolated_or_direct(sentence)
+    return _build_result(ps)
 
 
 def _current_glossary_signature() -> tuple[int, int] | None:
@@ -400,8 +432,9 @@ def index():
 @app.route("/static/<path:name>")
 def static_files(name):
     response = send_from_directory(STATIC, name)
-    # 静态资源内容随发布整体更新，本地工具可安全缓存，避免每次启动重复传输。
-    response.headers["Cache-Control"] = "public, max-age=86400"
+    # no-cache 强制每次用 ETag 协商（未变更返回 304）：本地传输成本可忽略，
+    # 但保证前端 JS/CSS 更新立即生效，不会出现 24h 内看到旧脚本的情况。
+    response.headers["Cache-Control"] = "no-cache"
     return response
 
 
@@ -428,6 +461,31 @@ def analyze():
     _refresh_translation_corpus_if_changed()
     results = [_analyze_sentence(s.strip()) for s in sentences]
     return jsonify({"results": results})
+
+
+@app.post("/api/refine")
+def refine():
+    """可选的在线分句树精修：由前端在本地结果渲染后异步调用，绝不阻塞主路径。"""
+    if not request.is_json:
+        return jsonify({"error": "请求体必须使用 application/json"}), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求体必须是 JSON 对象"}), 400
+    sentence = str(data.get("sentence", "")).strip()
+    if not sentence:
+        return jsonify({"error": "sentence 不能为空"}), 400
+    if len(sentence) > MAX_SENTENCE_CHARS:
+        return jsonify({"error": f"单句不能超过 {MAX_SENTENCE_CHARS} 个字符"}), 400
+    if not _llm_refiner.enabled():
+        return jsonify({"error": "未配置在线精修（PARSE_SPEC_LLM_BASE_URL / PARSE_SPEC_LLM_API_KEY）"}), 404
+    _refresh_glossary_if_changed()
+    _refresh_complex_words_if_changed()
+    _refresh_translation_corpus_if_changed()
+    local = spacy_worker.parse_isolated_or_direct(sentence)
+    refined = _llm_refiner.refine(sentence, local)
+    if refined is None:
+        return jsonify({"error": "在线精修不可用，已保留本地解析结果"}), 404
+    return jsonify({"result": _build_result(refined)})
 
 
 @app.get("/api/glossary")
@@ -731,8 +789,15 @@ def add_security_headers(response):
 
 if __name__ == "__main__":
     selected_port = _select_local_port()
+    active_model = _prefer_trf_model()
     spacy_worker.enable_isolation()  # 解析移入可超时的工作进程；超时/崩溃自动降级到规则引擎
+    threading.Thread(
+        target=spacy_worker.warmup,
+        name="parse-warmup",
+        daemon=True,
+    ).start()  # 后台加载解析模型，避免首次点击承担 trf 模型加载耗时
     if selected_port != DEFAULT_PORT:
         print(f"* 默认端口 {DEFAULT_PORT} 不可用，已自动切换到 {selected_port}")
+    print(f"* 解析模型 {active_model}（可用 PARSE_SPEC_SPACY_MODEL 覆盖）")
     print(f"* 访问 http://127.0.0.1:{selected_port}  (本地仅离线使用)")
     app.run(host="127.0.0.1", port=selected_port, debug=False)

@@ -148,6 +148,67 @@ class SentenceParserTests(unittest.TestCase):
         self.assertIn("最少附加数据时钟数", translated["text"])
         self.assertEqual([item["label"] for item in translated["clauses"]], ["第一项规定", "并列规定"])
 
+    def test_to_infinitive_fronted_purpose_clause(self):
+        parsed = parse_sentence(
+            "To avoid data corruption, the controller must wait until the PLL is locked."
+        )
+        main = next(clause for clause in parsed.clauses if clause.id == parsed.main_clause_id)
+        purpose = next(clause for clause in parsed.clauses if clause.relation == "purpose")
+        self.assertEqual(purpose.parent_id, main.id)
+        self.assertEqual(purpose.marker.lower(), "to")
+        self.assertEqual(purpose.text, "To avoid data corruption")
+        self.assertIn("must wait", main.text)
+
+    def test_spurious_as_participle_is_not_split_as_clause(self):
+        source = "Signals that are not defined in this specification should be treated as reserved."
+        parsed = parse_sentence(source)
+        main = next(clause for clause in parsed.clauses if clause.id == parsed.main_clause_id)
+        self.assertIn("treated as reserved", main.text)
+        self.assertFalse(any(clause.text.strip().lower() == "as reserved" for clause in parsed.clauses))
+
+    def test_by_gerund_means_adverbial_is_extracted(self):
+        parsed = parse_sentence(
+            "By setting the enable bit, the driver overrides the default policy."
+        )
+        main = next(clause for clause in parsed.clauses if clause.id == parsed.main_clause_id)
+        means = next(clause for clause in parsed.clauses if clause.relation == "means")
+        self.assertEqual(means.parent_id, main.id)
+        self.assertEqual(means.text, "By setting the enable bit")
+        self.assertEqual(main.text, "the driver overrides the default policy")
+
+    def test_based_on_fronted_basis_adverbial_is_extracted(self):
+        source = "Based on the result of the comparison, one of the two policies is selected."
+        parsed = parse_sentence(source)
+        main = next(clause for clause in parsed.clauses if clause.id == parsed.main_clause_id)
+        basis = next(clause for clause in parsed.clauses if clause.relation == "basis")
+        self.assertEqual(basis.parent_id, main.id)
+        self.assertEqual(basis.text, "Based on the result of the comparison")
+        # 主从颠倒被修复：真正的被动主句成为 c0
+        self.assertEqual(main.grammar.subject.lower(), "one")
+        self.assertEqual(main.grammar.predicate, "is selected")
+
+    def test_coordinated_subject_with_two_reduced_relatives(self):
+        source = (
+            "The DFI signals associated with each interface group, and the device originating the signal, "
+            "are shown in Figure 1 and Figure 2."
+        )
+        parsed = parse_sentence(source)
+        main = next(clause for clause in parsed.clauses if clause.id == parsed.main_clause_id)
+        # 并列主语必须完整展示，不能只显示第一个并列项
+        self.assertEqual(main.grammar.subject.lower(), "the dfi signals and the device")
+        self.assertEqual(main.grammar.predicate, "are shown")
+        relatives = sorted(
+            (clause for clause in parsed.clauses if clause.relation == "relative"),
+            key=lambda clause: clause.order,
+        )
+        self.assertEqual(len(relatives), 2)
+        first, second = relatives
+        self.assertEqual(first.text, "associated with each interface group")
+        self.assertEqual(first.grammar.antecedent.lower(), "the dfi signals")
+        self.assertEqual(first.grammar.subject.lower(), "the dfi signals")
+        self.assertEqual(second.text, "originating the signal")
+        self.assertEqual(second.grammar.antecedent.lower(), "the device")
+
     def test_complex_words_are_single_reading_words_not_phrases(self):
         hits = extract_complex_words("To ensure that updates do not interfere with other signals.", ComplexWordTable())
         by_lemma = {item["lemma"]: item for item in hits}
@@ -634,6 +695,218 @@ class ParseIsolationTests(unittest.TestCase):
         )
         self.assertEqual(parsed.engine, "rule-fallback")
         self.assertTrue(any("隔离" in warning for warning in parsed.warnings))
+
+
+class ModelSelectionTests(unittest.TestCase):
+    """解析模型选择：环境变量优先，失败回退默认链。"""
+
+    def test_model_candidates_default_chain(self):
+        from parse.spacy_parser import _model_candidates
+
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+            os.environ.pop("PARSE_SPEC_SPACY_MODEL", None)
+            self.assertEqual(_model_candidates(), ["en_core_web_sm"])
+
+    def test_model_candidates_env_override_with_fallback(self):
+        from parse.spacy_parser import _model_candidates
+
+        with patch.dict("os.environ", {"PARSE_SPEC_SPACY_MODEL": "en_core_web_trf"}):
+            self.assertEqual(_model_candidates(), ["en_core_web_trf", "en_core_web_sm"])
+
+    def test_server_prefers_trf_only_when_installed_and_env_free(self):
+        import importlib.util
+        import os
+
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("PARSE_SPEC_SPACY_MODEL", None)
+            installed = (
+                importlib.util.find_spec("en_core_web_trf") is not None
+                and importlib.util.find_spec("spacy_transformers") is not None
+            )
+            chosen = server._prefer_trf_model()
+            if installed:
+                self.assertEqual(chosen, "en_core_web_trf")
+            else:
+                self.assertEqual(chosen, "en_core_web_sm")
+
+        with patch.dict("os.environ", {"PARSE_SPEC_SPACY_MODEL": "en_core_web_sm"}):
+            self.assertEqual(server._prefer_trf_model(), "en_core_web_sm")
+
+
+class LlmRefineTests(unittest.TestCase):
+    """在线分句树精修层：校验、缓存、熔断与端点行为（全部离线模拟）。"""
+
+    SENTENCE = "Since the training is complete, the receiver can start reading data."
+
+    def _payload(self):
+        return {
+            "clauses": [
+                {
+                    "id": "c0", "parent_id": None, "relation": "main", "marker": "",
+                    "text": "the receiver can start reading data",
+                    "subject": "the receiver", "predicate": "can start",
+                    "object": "", "complement": "", "agent": "",
+                    "voice": "active", "negated": False,
+                },
+                {
+                    "id": "c1", "parent_id": "c0", "relation": "cause", "marker": "Since",
+                    "text": "Since the training is complete",
+                    "subject": "the training", "predicate": "is complete",
+                    "object": "", "complement": "", "agent": "",
+                    "voice": "active", "negated": False,
+                },
+            ]
+        }
+
+    def _refiner(self, directory: Path):
+        from parse.llm_refine import LlmRefiner
+
+        return LlmRefiner(directory / "parse_cache.json")
+
+    def _env(self):
+        # 测试专用哑凭据：程序化构造，源码中不出现凭据字面量。
+        dummy_key = "-".join(["test", "only", "dummy"])
+        return patch.dict("os.environ", {
+            "PARSE_SPEC_LLM_BASE_URL": "https://llm.example.invalid/v1",
+            "PARSE_SPEC_LLM_API_KEY": dummy_key,
+            "PARSE_SPEC_LLM_MODEL": "test-model",
+        })
+
+    def _without_env(self):
+        return patch.dict("os.environ", {}, clear=False)
+
+    def test_disabled_without_env_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            refiner = self._refiner(Path(directory))
+            with self._without_env():
+                import os
+                os.environ.pop("PARSE_SPEC_LLM_BASE_URL", None)
+                os.environ.pop("PARSE_SPEC_LLM_API_KEY", None)
+                self.assertFalse(refiner.enabled())
+                refiner._call_api = lambda text: self.fail("未配置时不得发起网络请求")
+                self.assertIsNone(refiner.refine(self.SENTENCE, None))
+
+    def test_refine_builds_validated_tree_and_caches(self):
+        from parse.clauser import parse_sentence as real_parse
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "parse_cache.json"
+            refiner = self._refiner(Path(directory))
+            calls = []
+
+            def fake_call(text):
+                calls.append(text)
+                return "hit", self._payload()
+
+            with self._env():
+                refiner._call_api = fake_call
+                refined = refiner.refine(self.SENTENCE, real_parse(self.SENTENCE))
+                self.assertIsNotNone(refined)
+                self.assertEqual(refined.refined_by, "test-model")
+                self.assertEqual(refined.main_clause_id, "c0")
+                cause = next(c for c in refined.clauses if c.id == "c1")
+                self.assertEqual(cause.relation, "cause")
+                self.assertEqual(cause.parent_id, "c0")
+                start, end = cause.segments[0]
+                self.assertEqual(refined.text[start:end], "Since the training is complete")
+
+                # 第二次调用命中磁盘缓存，不再联网
+                refiner2 = self._refiner(Path(directory))
+                refiner2._call_api = fake_call
+                again = refiner2.refine(self.SENTENCE, None)
+                self.assertIsNotNone(again)
+            self.assertEqual(calls, [self.SENTENCE])
+            self.assertTrue(cache_path.exists())
+
+    def test_hallucinated_substring_is_rejected_entirely(self):
+        payload = self._payload()
+        payload["clauses"][0]["text"] = "the receiver can start reading scalar data"  # 原句没有
+        with tempfile.TemporaryDirectory() as directory:
+            refiner = self._refiner(Path(directory))
+            with self._env():
+                refiner._call_api = lambda text: ("hit", payload)
+                self.assertIsNone(refiner.refine(self.SENTENCE, None))
+
+    def test_unknown_relation_and_bad_parent_fall_back_safely(self):
+        payload = self._payload()
+        payload["clauses"][1]["relation"] = "vibes"       # 未知关系 → ambiguous
+        payload["clauses"][1]["parent_id"] = "cX"         # 不存在的父分句 → c0
+        with tempfile.TemporaryDirectory() as directory:
+            refiner = self._refiner(Path(directory))
+            with self._env():
+                refiner._call_api = lambda text: ("hit", payload)
+                refined = refiner.refine(self.SENTENCE, None)
+        self.assertIsNotNone(refined)
+        cause = next(c for c in refined.clauses if c.id == "c1")
+        self.assertEqual(cause.relation, "ambiguous")
+        self.assertEqual(cause.parent_id, "c0")
+
+    def test_error_results_are_negative_cached_then_breaker_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            refiner = self._refiner(Path(directory))
+            calls = []
+
+            def failing_call(text):
+                calls.append(text)
+                return "error", None
+
+            with self._env():
+                refiner._call_api = failing_call
+                self.assertIsNone(refiner.refine(self.SENTENCE, None))
+                self.assertIsNone(refiner.refine(self.SENTENCE, None))  # 负缓存：未再联网
+                self.assertEqual(len(calls), 1)
+                # 换新句子连续失败：第 3 次失败（累计阈值 3）触发熔断，
+                # 之后的第 4 句不再发起请求。
+                for index in range(3):
+                    self.assertIsNone(refiner.refine(f"Another sentence {index} differs.", None))
+                self.assertTrue(refiner.breaker_active())
+                self.assertIsNone(refiner.refine("Yet another different sentence.", None))
+            self.assertEqual(len(calls), 3)  # 熔断期内不再发起请求
+
+    def test_refine_endpoint_requires_configured_refiner(self):
+        server.app.config.update(TESTING=True)
+        client = server.app.test_client()
+        old_refiner = server._llm_refiner
+        try:
+            with self._without_env():
+                import os
+                os.environ.pop("PARSE_SPEC_LLM_BASE_URL", None)
+                os.environ.pop("PARSE_SPEC_LLM_API_KEY", None)
+                server._llm_refiner = old_refiner
+                disabled = client.post("/api/refine", json={"sentence": self.SENTENCE})
+                self.assertEqual(disabled.status_code, 404)
+
+            class FakeRefiner:
+                def enabled(self):
+                    return True
+
+                def refine(self, sentence, local):
+                    from parse.clauser import ClauseNode, Grammar, ParsedSentence
+                    return ParsedSentence(
+                        text=sentence,
+                        clauses=[ClauseNode(
+                            id="c0", parent_id=None, order=0, text=sentence,
+                            start=0, end=len(sentence), segments=[(0, len(sentence))],
+                            kind="main", relation="main", label="核心命题",
+                            grammar=Grammar(subject="x", predicate="y"),
+                        )],
+                        main_clause_id="c0",
+                        engine="spacy",
+                        refined_by="test-model",
+                    )
+
+            server._llm_refiner = FakeRefiner()
+            ok = client.post("/api/refine", json={"sentence": self.SENTENCE})
+            self.assertEqual(ok.status_code, 200)
+            result = ok.get_json()["result"]
+            self.assertEqual(result["refined_by"], "test-model")
+            self.assertEqual(result["main_clause_id"], "c0")
+
+            empty = client.post("/api/refine", json={"sentence": "   "})
+            self.assertEqual(empty.status_code, 400)
+        finally:
+            server._llm_refiner = old_refiner
 
 
 class OnlineDictionaryTests(unittest.TestCase):

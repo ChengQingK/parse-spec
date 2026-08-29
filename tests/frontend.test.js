@@ -415,6 +415,50 @@ test("结构树展示逻辑关系且不拼接重复引导词", () => {
 });
 
 
+test("长引号标题在树节点折叠且原句卡片保持完整", () => {
+  const { context, elements } = loadViewer();
+  const longTitle = "Block Diagram of Interface Signals: Command, Write Data, Read Data, Update, Status, PHY Managed, Disconnect and Error";
+  const text = `The DFI signals and the device are shown in Figure 1, “${longTitle}”.`;
+  context.renderAnalysisPanel({ pageNum: 1, sentenceIndex: 0, text }, {
+    schema_version: 3,
+    text,
+    engine: "spacy",
+    main_clause_id: "c0",
+    clauses: [
+      { id: "c0", parent_id: null, order: 0, text, start: 0, end: text.length, segments: [[0, text.length]], kind: "main", relation: "main", label: "核心命题", marker: "", grammar: { subject: "The DFI signals and the device", predicate: "are shown", object: "", agent: "", complement: "", voice: "passive", negated: false, modality: "" }, confidence: .95, warnings: [] },
+    ],
+    terms: [],
+    translation: null,
+    warnings: [],
+  });
+  const html = elements["analysis-content"].innerHTML;
+  // 结构树与聚焦卡里标题折叠：保留前 6 个词 + 省略号
+  assert.match(html, /“Block Diagram of Interface Signals: Command, …”/);
+  assert.match(html, /class="folded-quote"/);
+  // 折叠节点的 title 属性携带未折叠全文（悬停可读）
+  assert.match(html, /title="[^"]*Disconnect and Error[^"]*"/);
+  // 原句卡片始终完整，不折叠
+  assert.match(html, /panel-source-text[\s\S]*Disconnect and Error/);
+
+  // 短引号（≤6 词）不折叠
+  const shortText = "The register is described in Figure 3, “Clock Overview”.";
+  context.renderAnalysisPanel({ pageNum: 2, sentenceIndex: 1, text: shortText }, {
+    schema_version: 3,
+    text: shortText,
+    engine: "spacy",
+    main_clause_id: "c0",
+    clauses: [
+      { id: "c0", parent_id: null, order: 0, text: shortText, start: 0, end: shortText.length, segments: [[0, shortText.length]], kind: "main", relation: "main", label: "核心命题", marker: "", grammar: { subject: "The register", predicate: "is described", object: "", agent: "", complement: "", voice: "passive", negated: false, modality: "" }, confidence: .95, warnings: [] },
+    ],
+    terms: [],
+    translation: null,
+    warnings: [],
+  });
+  const shortHtml = elements["analysis-content"].innerHTML;
+  assert.match(shortHtml, /“Clock Overview”/);
+  assert.doesNotMatch(shortHtml, /folded-quote/);
+});
+
 test("拖动宽度受边界限制并保存", () => {
   const { context, elements, storage } = loadViewer();
   context.setPanelWidth(900, true);

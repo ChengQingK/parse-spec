@@ -826,17 +826,6 @@ function jumpToBookmark(bookmark) {
   return jumped;
 }
 
-function offsetWithin(element, ancestor, axis = "top") {
-  let total = 0;
-  let current = element;
-  const key = axis === "left" ? "offsetLeft" : "offsetTop";
-  while (current && current !== ancestor) {
-    total += Number(current[key] || 0);
-    current = current.offsetParent;
-  }
-  return total;
-}
-
 async function navigatePdfDestination(pdf, destination) {
   const resolved = await resolvePdfDestination(pdf, destination);
   if (!resolved || !document.querySelector) return false;
@@ -865,11 +854,15 @@ async function navigatePdfDestination(pdf, destination) {
     }
   }
   if (documentPane && typeof documentPane.scrollTo === "function") {
-    // offsetTop/scrollTop 是 CSS zoom 后的缩放坐标，页内坐标需同步乘以缩放倍率
+    // 全部换算到滚动容器的可视坐标系：getBoundingClientRect 与 scrollTop
+    // 同属一套坐标（CSS zoom 下 offsetTop 的单位存在浏览器歧义，不再使用）；
+    // localX/localY 是页面未缩放布局像素，需乘以缩放倍率。
+    const paneRect = documentPane.getBoundingClientRect();
+    const pageRect = pageElement.getBoundingClientRect();
     const zoom = committedPdfZoom || 1;
     documentPane.scrollTo({
-      top: Math.max(0, offsetWithin(pageElement, documentPane, "top") + localY * zoom - 12),
-      left: Math.max(0, offsetWithin(pageElement, documentPane, "left") + localX * zoom - 12),
+      top: Math.max(0, pageRect.top - paneRect.top + (Number(documentPane.scrollTop) || 0) + localY * zoom - 12),
+      left: Math.max(0, pageRect.left - paneRect.left + (Number(documentPane.scrollLeft) || 0) + localX * zoom - 12),
       behavior: "smooth",
     });
   } else if (pageElement.scrollIntoView) {
@@ -1012,6 +1005,36 @@ async function loadAndRender(target, requestId, force = false) {
   }
   if (requestId !== requestSerial || !selectedTarget || selectedTarget.key !== target.key) return;
   renderAnalysisPanel(target, result);
+  maybeRefineSentence(target, requestId);
+}
+
+// 在线精修失败过的句子本会话内不再重试，避免每次点击都等待超时。
+const refineSkipped = new Set();
+
+async function maybeRefineSentence(target, requestId) {
+  const sentence = String(target.text || "");
+  const current = sentenceResults.get(sentence);
+  if (!sentence || sentence.length > 400 || (current && current.refined_by) || refineSkipped.has(sentence)) return;
+  try {
+    const response = await fetch("/api/refine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sentence }),
+    });
+    if (!response.ok) {
+      refineSkipped.add(sentence); // 404 = 未配置/不可用：静默保留本地解析
+      return;
+    }
+    const data = await response.json();
+    const refined = data && data.result;
+    if (!refined || !refined.refined_by || !Array.isArray(refined.clauses) || !refined.clauses.length) return;
+    sentenceResults.set(sentence, refined);
+    if (requestId === requestSerial && selectedTarget && selectedTarget.key === target.key) {
+      renderAnalysisPanel(target, refined);
+    }
+  } catch (_error) {
+    refineSkipped.add(sentence);
+  }
 }
 
 function refreshSelectedAnalysis(loadIfMissing = true) {

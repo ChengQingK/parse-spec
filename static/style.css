@@ -575,6 +575,19 @@ label:focus-within,
   font-size: 10.5px;
 }
 
+.engine-badge.refine-badge {
+  background: #eef6ee;
+  color: #3c7a44;
+}
+
+/* 树节点里折叠的长引号标题：虚线下划线提示有省略，悬停 title 展示全文 */
+.folded-quote {
+  text-decoration: underline dotted;
+  text-decoration-color: #9aa7b8;
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
 .source-card,
 .translation-card {
   margin-bottom: 18px;

@@ -1,17 +1,18 @@
 # AGENTS.md
 
-这里是 **parse-spec** —— 一个英文长难句解析工具：前端用 pdf.js 渲染 SPEC PDF，悬停预览句子范围，单击后调用后端构建逻辑分句树并在持久侧边栏展示。解析、术语与整句翻译**全程本地离线**；唯一例外是右击单词的词典详情（`/api/word-info`）与复杂词添加的释义兜底（`/api/complex-words/suggest` 第四级）会联网查询在线免费词典，带磁盘缓存与离线降级。所有注释与 UI 均为中文。
+这里是 **parse-spec** —— 一个英文长难句解析工具：前端用 pdf.js 渲染 SPEC PDF，悬停预览句子范围，单击后调用后端构建逻辑分句树并在持久侧边栏展示。解析、术语与整句翻译**全程本地离线**；唯一例外是右击单词的词典详情（`/api/word-info`）、复杂词添加的释义兜底（`/api/complex-words/suggest` 第四级）与可选的分句树在线精修（`/api/refine`）会联网查询，均带磁盘缓存、熔断与离线降级，绝不阻塞本地解析路径。所有注释与 UI 均为中文。
 
 ## 运行命令
 
 - 启动服务：`python server.py` → 默认 http://127.0.0.1:5197（Flask，仅绑定本地）；端口不可绑定时自动回退到 5800 等备用端口，以终端打印地址为准。指定端口用环境变量，如 `$env:PARSE_SPEC_PORT=6800`。
-- 生成示例 PDF：`python make_sample.py` → 生成 `docs/sample_spec.pdf`；`docs/DDR_PHY_Interface_Specification_v5_2.pdf` 是真实 DFI 回归样本，用于验证目录 Link 注解、复杂文本层和长句解析。
+- 生成示例 PDF：`python make_sample.py` → 生成 `docs/sample_spec.pdf`（4 页、每页一个目录书签，用于虚拟化/目录跳转的端到端回归）；`docs/DDR_PHY_Interface_Specification_v5_2.pdf` 是真实 DFI 回归样本，用于验证目录 Link 注解、复杂文本层和长句解析。
 - 初始化环境：`uv venv --python 3.11 .venv`，然后 `uv pip install --python .venv\Scripts\python.exe -r requirements.txt .\vendor\en_core_web_sm-3.8.0-py3-none-any.whl`
 - `server.py` 在直接运行且当前解释器缺 Flask 时，会自动切换到已有的项目 `.venv`；没有 `.venv` 则打印上述安装命令。
 - 完整自测：`.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v`、`npm test`（首次运行前端测试前先 `npm ci` 安装 devDependencies）
 - 端到端测试：`npm run test:e2e`（Playwright + 系统 Edge 通道，webServer 自动拉起 `python server.py`；`PARSE_SPEC_BROWSER` / `PARSE_SPEC_E2E_PORT` / `PARSE_SPEC_PYTHON` 可覆盖，默认端口 5800 规避 5197 常见的 Windows 排除范围）
 - CI：`.github/workflows/ci.yml` 在 push/PR 时跑 Python 测试（ubuntu + windows）与 `npm test`
 - 模块冒烟：`python -m parse.clauser`、`python -m parse.glossary`
+- 可选升级解析模型：`python scripts/fetch_models.py`（下载官方 en_core_web_trf wheel，GitHub 失败自动走 hf-mirror.com，sha256 校验；安装步骤见 requirements.txt 头部）
 - 环境：Python 3.11；前端测试要求 Node.js ≥22.13。
 - 前端无构建步骤：`pdfjs-dist@6.2.108` 的模块版运行文件已 vendor 到 `static/pdf.min.mjs` 与 `static/pdf.worker.min.mjs`。升级后运行 `npm run sync:pdfjs`；`npm test` 会先做哈希一致性校验。
 
@@ -19,18 +20,19 @@
 
 `parse_sentence` 的实际解析**已由原纯规则引擎替换为 spaCy**（见 `parse/spacy_parser.py`）：
 
-- 使用本地模型 **`en_core_web_sm`（3.8.0）**，wheel 保存在 `vendor/`，可完全离线安装和运行。
-- 模型**不在常用 PyPI 镜像上**，不要在初始化时重复下载；直接安装仓库中的 wheel（见 `requirements.txt` 头部注释）。
+- 模型经 `PARSE_SPEC_SPACY_MODEL` 环境变量选择，加载失败自动回退默认链（当前默认 **`en_core_web_sm`（3.8.0）**，wheel 保存在 `vendor/`）。安装了可选的 **`en_core_web_trf`**（依存精度显著更高，见 `scripts/fetch_models.py` 与 `requirements.txt` 头部说明）时，`python server.py` 启动会自动启用并后台预热（`spacy_worker.warmup`），测试与直接导入场景不受影响仍用 sm。
+- 模型**不在常用 PyPI 镜像上**（PyPI 同名包是占位假包），不要在初始化时重复下载；sm 直接安装仓库中的 wheel，trf 用 `scripts/fetch_models.py` 下载（GitHub 直连失败自动改走 hf-mirror.com，带 sha256 校验）。
 - `parse/clauser.py` 保留原纯规则逻辑（`segment_clauses`/`structure`）作为**回退**：spaCy 或模型不可用时 `parse_sentence` 自动降级；运行异常会写日志并在 `warnings` 中标明异常类型。
 - `parse/__init__.py` 中的旧铁律"禁止 spaCy"已随此替换废除，以本文件为准。
 - **解析隔离**：`python server.py` 直接运行时经 `parse/spacy_worker.py` 把解析放入持久工作进程，`PARSE_SPEC_PARSE_TIMEOUT`（默认 10s）限时；超时/工作进程崩溃自动降级到规则引擎并在 `warnings` 说明。测试与导入场景保持同步解析路径；`_analyze_sentence` 与 `extract_complex_words` 共享同一次 spaCy 解析（`ParsedSentence.lemma_spans`），不要对同一句子重复调用 `_NLP`。
 
 ### spaCy 解析实现要点（`parse/spacy_parser.py`）
 
-- `_clause_roots`：按 `relcl` / `advcl` / `ccomp` / `xcomp` / `csubj` / `acl` 找分句根；`_nearest_clause_parent` 沿依存祖先建立父子关系，嵌套从句不再被合并丢失。
+- `_clause_roots`：按 `relcl` / `advcl` / `ccomp` / `xcomp` / `csubj` / `acl` 找分句根；`_nearest_clause_parent` 沿依存祖先建立父子关系，嵌套从句不再被合并丢失。伪从句过滤：`_is_false_technical_acl`（timing 误标）与 `_is_spurious_as_adverbial`（"treat as reserved" 的 as+分词补语，判别特征是 as 为 advmod/case 且无 mark/主语/agent，真分句 "as required by the PHY" 的 as 是 mark 且带 agent）。
+- `_fronted_clause_roots`：把模型标成 prep 短语的前置/后置状语恢复为独立分句——"By + 动名词" → `means`（方式手段），"Based on / According to / Depending on + 名词" → `basis`（依据要求）；与依存从句共用同一套编号、排除与父子判定。
 - `_own_tokens` / `_segments`：从节点文本中排除子分句，同时保留精确字符区间；主句允许多个不连续 `segments`。
-- `_grammar`：为每个分句独立提取主语、谓语、宾语、被动执行者、补语、语态、否定和情态。
-- `_relation`：结合依存标签和连接词映射 `main/concession/condition/time/cause/purpose/result/relative/content/complement/ambiguous`；多义连接词返回警告。
+- `_grammar`：为每个分句独立提取主语、谓语、宾语、被动执行者、补语、语态、否定和情态。`_phrase` 默认把 `conj`/`cc` 一并纳入（“The DFI signals and the device” 完整显示），定语从句的先行词与缩略定语从句自身主语除外（只取中心名词）。
+- `_marker` / `_relation`：结合依存标签和连接词映射 `main/concession/condition/time/cause/purpose/result/relative/content/complement/basis/means/ambiguous`；不定式目的状语 "To do ..." 的 to 是 aux/TO 依存（不是 mark），同样识别为 `purpose`；多义连接词返回警告。
 - 模块间使用延迟导入避免循环依赖；`spacy_parser` 顶层不运行时 import `clauser`。
 
 ## 架构与数据流
@@ -57,7 +59,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - canvas 位图按 `fitCanvasScale(S × devicePixelRatio × pdfZoom)`（封顶 3.2 倍/1600 万像素）渲染；CSS `zoom` 布局体系不变，缩放提交后仅重渲已挂载页的位图（`rerenderMountedCanvases`），高倍缩放不再模糊。
 - 高亮 rect **懒计算**：挂载时只用行级回退矩形（`computeFallbackRects` 纯坐标），字符级精确矩形由 `scheduleExactRectsWarmup`（requestIdleCallback/60ms 回退）升级并重建 mark 层；悬停命中 leading 同步 + rAF trailing 合并；`toggleSentenceMarks` 走 `markElementsByKey` 引用缓存，不再全文档 `querySelectorAll`。
 - 页码统计用缓存的未缩放 `pageTops/pageHeights` 数组 + `pageIndexAtScroll` 二分；术语/复杂词搜索 150ms 防抖；词典保存按词失效 `sentenceResults`。
-- `static/app.js` 并行拉取 `pdf.min.mjs` 与 `pdf_helpers.js`，随后依次注入 `viewer_sentences.js`、`viewer_marks.js`、`viewer_pages.js`、`viewer_hits.js`、`viewer_sidebar.js` 再加载 `viewer.js`（顺序不可变），`index.html` 有 modulepreload；静态响应带 `Cache-Control: max-age=86400`；`mountPageVisual` 使用 PDF.js 6 的 `TextLayer` 类生成透明文本层。
+- `static/app.js` 并行拉取 `pdf.min.mjs` 与 `pdf_helpers.js`，随后依次注入 `viewer_sentences.js`、`viewer_marks.js`、`viewer_pages.js`、`viewer_hits.js`、`viewer_sidebar.js` 再加载 `viewer.js`（顺序不可变），`index.html` 有 modulepreload；静态响应带 `Cache-Control: no-cache`（ETag 协商缓存，更新立即生效）；`mountPageVisual` 使用 PDF.js 6 的 `TextLayer` 类生成透明文本层。
 - 文本层保留原生文本选择/复制；必须保留 PDF.js 6 的 `--total-scale-factor/--text-scale-factor/--font-height/--scale-x` CSS，缺失会导致透明文字宽度和高亮越过页面右侧。
 - `.sentence-mark-layer` 使用每个 TextItem 内的字符偏移和 DOM `Range.getClientRects()` 绘制真实字形范围，坐标估算只作为损坏文本层的回退。
 - 每页还会读取 Link annotation，生成只支持内部目标、安全 named action 和 HTTP(S) 的 `.annotation-layer`；不得执行 PDF JavaScript。
@@ -87,6 +89,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - “复杂词”指较难理解的单个通用英文单词，由 `parse/complex_words.py` 的内置表与根目录 `complex_words.json` 的用户表共同识别；顶栏复杂词表支持增删改查，分析原文支持右击单词快速添加，并按复杂词表、术语表、本地翻译词典的顺序自动填写释义。不要再把固定词组显示为复杂词。译文中仍为英文且存在释义的词可点击原位切换为中文。
 - `Esc`、关闭按钮或顶栏收起会清除选中并关闭分析栏；拖选文字时 `hasTextSelection()` 抑制句子选择。
 - 树节点悬停时使用后端 `segments` 在右栏原句中精确标记对应片段；PDF 文本层仍保持整句高亮，避免破坏原生复制。
+- 树节点与核心命题卡片中的超长引号标题（如 Figure 图题，>6 词）折叠为 `“前 6 个词 …”` 并以 `title` 属性携带全文（悬停可读）；原句卡片、原文联动高亮与字符区间 `segments` 始终保持完整不变。
 
 ## 核心接口
 
@@ -107,6 +110,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - `/api/complex-words`：复杂词表 GET/POST/DELETE，及 `/api/complex-words/suggest`（添加时按复杂词表→术语表→本地翻译词典顺序建议释义，本地均未命中时再用在线词典的中文释义兜底）。
 - `/api/bookmarks`：书签 GET/POST，统一持久化到根目录 `bookmarks.json`。
 - `/api/word-info`：在线词典详情（音标/在线中文释义/词性/英文释义/双语例句/同义词/搭配），由 `parse/online_dict.py` 多源查询——默认有道（youdao）优先、dictionaryapi.dev（freeapi）回退，`PARSE_SPEC_DICT_SOURCES` 环境变量可调整顺序；单源网络失败会熔断跳过 30 分钟，避免每次查询都等待超时。2.5s 超时、内存+`word_cache.json` 磁盘正负缓存（命中永久有效、未收录 24h、网络错误 1h TTL）；失败返回 404，前端回退为仅显示本地释义。整句翻译路径不经过此端点。
+- `/api/refine`：可选的在线分句树精修（`parse/llm_refine.py`）。前端在本地结果渲染后异步调用，主解析路径零等待；未配置 `PARSE_SPEC_LLM_BASE_URL` / `PARSE_SPEC_LLM_API_KEY` 时返回 404，前端静默保留本地结果。LLM 走 OpenAI 兼容端点（`PARSE_SPEC_LLM_MODEL` 默认 glm-4-flash，`PARSE_SPEC_LLM_TIMEOUT` 默认 6s），只允许 https 公网或回环 http、拒绝重定向、响应封顶 4MB；分句文本必须是原句精确子串，任一分句定位失败即整体弃用。`parse_cache.json` 磁盘正负缓存（命中永久、错误 1h）+ 连续失败 3 次熔断 30 分钟；精修结果带 `refined_by: <模型名>` 字段，侧栏显示“在线精修”徽标。
 
 `POST /api/analyze` 请求：
 ```json
@@ -133,7 +137,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 }
 ```
 
-`translation` 由完全离线的结构翻译器生成，属于辅助译文而非生成式模型输出；`terms`、`complex_words` 和 `warnings` 可能为空数组。复杂词由 `parse/complex_words.py` 的内置阅读词表、项目根目录 `complex_words.json` 的用户词表及 spaCy lemma 共同识别。
+`translation` 由完全离线的结构翻译器生成，属于辅助译文而非生成式模型输出；`terms`、`complex_words` 和 `warnings` 可能为空数组。复杂词由 `parse/complex_words.py` 的内置阅读词表、项目根目录 `complex_words.json` 的用户词表及 spaCy lemma 共同识别。`/api/refine` 返回的 `result` 与本契约同构，额外带 `refined_by` 字段。
 
 ## 已知坑
 
@@ -141,9 +145,15 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - spaCy 路径用 tokenizer 与 lemma 抽取术语；规则降级路径仍依赖正则候选和 `Glossary.lookup` 的轻量后缀还原。
 - 跨页合并是保守启发式：下一页以专有名词或大写缩写续接时可能只给出“疑似截断”提示；表格和 PDF 自身错误阅读顺序仍可能误切。
 - `/api/word-info` 依赖在线词典（有道 + dictionaryapi.dev）：全部源失败或未收录时详情区显示“在线详情不可用”；解析译文中的中文释义始终来自本地词表，不受网络影响（复杂词添加弹层里的“在线中文”释义除外，会明确标注来源）。`word_cache.json` 是运行期缓存，不提交 Git。
+- `/api/refine` 的精修质量取决于所配 LLM；校验层只保证分句文本逐字符来自原句，不保证逻辑关系标注正确，`warnings` 中始终注明“在线模型精修”。`parse_cache.json` 是运行期缓存，不提交 Git；`vendor/en_core_web_trf-*.whl`（437MB）同样不入库，经 `scripts/fetch_models.py` 下载。
 - 页面虚拟化以占位高度估算滚动位置，极端变高页的滚动锚点在挂载/卸载瞬间可能有轻微偏移；`page.cleanup()` 后重渲依赖 pdf.js 重新解析，超大页重渲仍有成本。
 
 ## 变更记录（2026-08）
+
+- 2026-08-29：分句树质量三层整改（源自“待确认过多、To xxx 前置成分未拆”调查）——①**规则层**：`_marker`/`_relation` 识别不定式目的状语（“To do ...” 的 to 是 aux/TO 依存 → `purpose`，消灭最大宗的“关系待确认”）；新增 `_is_spurious_as_adverbial` 伪从句过滤（“treat as reserved” 的 as+分词补语不再被拆成独立分句）；新增 `_fronted_clause_roots` 把模型标成 prep 短语的 “By + 动名词”（→`means` 方式手段）与 “Based on/According to + 名词”（→`basis` 依据要求）恢复为独立分句，“Based on ..., one of ... is selected” 类主从颠倒被同步修复；②**模型层**：`PARSE_SPEC_SPACY_MODEL` 可选模型，`scripts/fetch_models.py` 下载官方 `en_core_web_trf`（GitHub 直连失败自动走 hf-mirror.com，sha256 校验；PyPI 同名包是占位假包），server 启动自动优先 trf 并经 `spacy_worker.warmup` 后台预热；③**在线精修层**：新增 `parse/llm_refine.py` 与 `POST /api/refine`（OpenAI 兼容端点、环境变量配置、精确子串校验、磁盘正负缓存 + 熔断），前端本地结果渲染后异步精修替换并显示徽标，未配置时 404 静默降级。`ParsedSentence` 新增 `refined_by` 字段；前端新增 `means` 关系标签与精修徽标样式。测试数 64（Python）+ 46（Node）+ 4（e2e）。
+- 2026-08-29（续）：DFI 2.3.3 并列主语句回归——`_phrase` 把 `conj`/`cc` 纳入短语提取，修复并列主语只显示第一个并列项的截断（“The DFI signals and the device” 此前只显示 “The DFI signals”）；定语从句的先行词与缩略定语从句自身主语仍只取中心名词，避免把并列的另一主语误计入从句。
+- 2026-08-29（续 2）：展示层引号标题折叠（选定方案A，展示不变数据）——`viewer_sidebar.js` 新增 `foldLongQuotedTitles`/`foldedClauseHtml`，嵌套树节点、聚焦卡、联动树节点与简洁模式核心命题卡中超长引号标题（>24 字符且 >6 词）折叠为 `“前 6 词 …”`，折叠节点带 `title` 全文悬停展开；原句卡片、原文联动高亮与 `segments` 不变。解析层遮蔽（方案B）经实测在 trf 下无任何输出差异，未采用。
+- 2026-08-29（续 3）：修复非 100% 缩放下目录跳转错位——`navigatePdfDestination` 原先累加 `offsetTop` 计算滚动目标，CSS zoom ≠ 1 时其单位与 `scrollTop` 不一致（zoom=1 时恰好重合，故仅非 100% 缩放异常）；改用 `getBoundingClientRect` 相对坐标（与 `scrollTop` 同属滚动容器可视坐标系），页内坐标仍乘缩放倍率。静态资源缓存由 `max-age=86400` 改为 `no-cache`（ETag 协商），前端更新立即生效。示例 PDF 扩为 4 页 + 目录书签，新增 e2e 回归“110% 缩放下目录跳转准确落点”（落点容差 60px，页码状态同步断言）。测试数 65（Python）+ 47（Node）+ 5（e2e）。
 
 - 2026-08-29：全面工程化整改（源自全面分析报告的 8 项路线）——①消除热路径双重 spaCy 解析（`ParsedSentence.lemma_spans` 透传给复杂词识别）；②`bookmarks/glossary/complex_words` 三份用户数据 JSON 出库并加入 `.gitignore`；③新增 GitHub Actions CI（Python 双平台 + npm test）；④新增 `parse/spacy_worker.py` 隔离工作进程，`PARSE_SPEC_PARSE_TIMEOUT` 限时、超时自动降级规则引擎；⑤`viewer.js` 重构为 `createViewer` 工厂并拆分出 `viewer_sentences.js`/`viewer_marks.js`/`viewer_pages.js`/`viewer_hits.js`/`viewer_sidebar.js`（虚拟化管线状态内聚、命中映射与侧栏依赖注入），Node 测试基建移除全部 vm 动态执行（新 `tests/helpers/browser_sandbox.js`）；⑥修复 `wireTextLayer` 高倍缩放下歧义 span 判别失准；⑦翻译层语料化：新增 `parse/translation_corpus.py`（内置短语/模板列表 + 可选用户 `translation_corpus.json`，签名热重载并清除分析缓存），`translator.py` 改为消费语料层的纯引擎；⑧新增 Playwright e2e（`npm run test:e2e`，真实浏览器覆盖加载/点击解析/主题/Esc）。另：`online_dict` 增加 https + 预期词典主机校验与重定向守卫，缓存写合并；`server.py` 增加 Host 白名单；单词校验收紧；词典模块日志统一；CI YAML 经 js-yaml 结构校验。测试数 51（Python）+ 46（Node）+ 4（e2e）。
 - 2026-08-28：在线词典多源化——`parse/online_dict.py` 从单一 dictionaryapi.dev 改为多源查询：有道（youdao jsonapi）优先、dictionaryapi.dev 回退，单源网络失败熔断跳过 30 分钟，`PARSE_SPEC_DICT_SOURCES` 可调顺序；响应新增在线中文释义（`zh_gloss`）与双语例句（`examples`）字段并在词详情区展示。`/api/complex-words/suggest` 在本地三级源均未命中时，用在线中文释义（去词性前缀）兜底自动填表。背景：dictionaryapi.dev 在境内长期直连超时，导致右击词典详情几乎总是 404。

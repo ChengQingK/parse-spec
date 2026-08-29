@@ -774,6 +774,7 @@
         purpose: "目的从句",
         result: "结果从句",
         basis: "依据要求",
+        means: "方式手段",
         relative: "定语从句",
         content: "内容从句",
         complement: "补语从句",
@@ -790,6 +791,25 @@
         recommended: "规范建议",
         permitted: "许可 / 能力",
       })[clause.grammar.requirement_level] || "";
+    }
+
+    // 树节点里的长引号标题（如 Figure 图题）折叠展示，避免淹没分句主干；
+    // 原句卡片与原文联动高亮始终完整。悬停可查看未折叠全文。
+    const QUOTE_FOLD_MAX_WORDS = 6;
+
+    function foldLongQuotedTitles(text) {
+      return String(text || "").replace(/[“"]([^”"]{24,})[”"]/g, (match, inner) => {
+        const words = inner.trim().split(/\s+/);
+        if (words.length <= QUOTE_FOLD_MAX_WORDS) return match;
+        return `${match[0]}${words.slice(0, QUOTE_FOLD_MAX_WORDS).join(" ")} …${match[match.length - 1]}`;
+      });
+    }
+
+    function foldedClauseHtml(text) {
+      const source = String(text || "");
+      const folded = foldLongQuotedTitles(source);
+      const escaped = esc(folded);
+      return folded === source ? escaped : `<span class="folded-quote" title="${esc(source)}">${escaped}</span>`;
     }
 
     function bracketClauseText(clause) {
@@ -825,7 +845,7 @@
         : "";
       return `<div class="bracket-group clause-interactive relation-${esc(clause.relation || "ambiguous")}" data-clause-id="${esc(clause.id)}">
     <span class="bracket-inline-label">${labelParts.map(esc).join(" · ")}</span>
-    <span class="bracket-inline-text">${esc(bracketClauseText(clause))}</span>
+    <span class="bracket-inline-text">${foldedClauseHtml(bracketClauseText(clause))}</span>
     ${nested}
   </div>`;
     }
@@ -839,7 +859,7 @@
     <div class="bracket-groups">${topLevel.map((clause) => renderBracketBranch(clause, childrenByParent, main.id, leadingIds)).join("")}</div>
     <div class="bracket-focus-card">
       <span class="bracket-focus-label" id="clause-focus-label">${esc(bracketRelationLabel(main))}</span>
-      <strong id="clause-focus-text">${esc(main.text)}</strong>
+      <strong id="clause-focus-text">${foldedClauseHtml(main.text)}</strong>
       <span class="bracket-focus-meta" id="clause-focus-meta">${esc(clauseFocusMeta(main, detailed))}</span>
     </div>
   </div>`;
@@ -878,7 +898,7 @@
     <details class="linked-tree-node clause-interactive relation-${esc(clause.relation || "ambiguous")}" data-clause-id="${esc(clause.id)}"${detailed ? " open" : ""}>
       <summary>
         <div class="linked-node-heading"><span class="relation-badge">${esc(clause.label || clause.relation)}</span>${marker}${confidence}</div>
-        <div class="linked-node-text">${esc(clause.text)}</div>
+        <div class="linked-node-text">${foldedClauseHtml(clause.text)}</div>
         ${syntax ? `<div class="linked-node-syntax">${syntax}</div>` : ""}
       </summary>
       ${clauseDetailsHtml(clause, detailed)}
@@ -1004,14 +1024,17 @@
       const globalWarnings = [...(target.contextWarnings || []), ...parserWarnings]
         .map((warning) => `<div class="global-warning">${esc(warning)}</div>`).join("");
       const engineName = result.engine === "spacy" ? "spaCy 本地解析" : "规则降级解析";
+      const refineBadge = result.refined_by
+        ? `<span class="engine-badge refine-badge" title="分句树由在线模型精修，本地解析仍即时可用">在线精修 · ${esc(result.refined_by)}</span>`
+        : "";
       const structureLabel = structureView === "linked" ? "原文联动树" : "嵌套原文";
       const logicSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">逻辑结构 · ${structureLabel}</h3>${structureHtml}</section>`;
       const termsSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">复杂词</h3>${complexWordsHtml || '<div class="empty-copy">本句没有识别到较难的通用单词</div>'}<h3 class="section-heading term-heading">术语</h3>${termsHtml}</section>`;
-      const conciseCore = concise ? `<section class="analysis-section concise-core"><h3 class="section-heading">核心命题</h3><div class="core-card">${esc(main.text)}</div></section>` : "";
+      const conciseCore = concise ? `<section class="analysis-section concise-core"><h3 class="section-heading">核心命题</h3><div class="core-card">${foldedClauseHtml(main.text)}</div></section>` : "";
 
       analysisContent.innerHTML = `<div class="sentence-meta">
       <span>${targetLocationText(target)}</span>
-      <span class="meta-badges"><span class="depth-badge">${depthText(depth)}</span><span class="engine-badge">${engineName}</span></span>
+      <span class="meta-badges"><span class="depth-badge">${depthText(depth)}</span><span class="engine-badge">${engineName}</span>${refineBadge}</span>
     </div>
     <div class="source-card"><p class="source-text" id="panel-source-text">${esc(result.text || target.text)}</p><div class="source-context-hint">右击原文中的英文单词，可加入复杂词表</div></div>
     ${translationHtml}${conciseCore}${logicSection}
@@ -1053,7 +1076,9 @@
         const showClauseDetail = (clause) => {
           if (!focusLabel || !focusText || !focusMeta) return;
           focusLabel.textContent = bracketRelationLabel(clause);
-          focusText.textContent = clause.text || "";
+          const folded = foldLongQuotedTitles(clause.text || "");
+          focusText.textContent = folded;
+          focusText.title = folded === String(clause.text || "") ? "" : String(clause.text || "");
           focusMeta.textContent = clauseFocusMeta(clause, detailed);
         };
         for (const item of interactiveItems) {

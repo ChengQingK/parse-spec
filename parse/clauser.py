@@ -69,6 +69,8 @@ class ParsedSentence:
     term_candidates: list[tuple[str, str]] = field(default_factory=list, repr=False)
     # (start, end, lemma)：spaCy 路径随解析一并产出，供复杂词识别复用，避免二次解析。
     lemma_spans: list[tuple[int, int, str]] = field(default_factory=list, repr=False)
+    # 非空表示分句树由该在线模型精修过（本地解析始终即时返回，精修是可选增强层）。
+    refined_by: str = ""
 
 
 @dataclass(slots=True)
@@ -127,6 +129,8 @@ _RELATION_LABELS = {
     "content": "内容从句",
     "complement": "补充说明",
     "parenthetical": "插入说明",
+    "basis": "依据要求",
+    "means": "方式手段",
     "ambiguous": "关系待确认",
 }
 
