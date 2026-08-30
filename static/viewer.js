@@ -191,6 +191,9 @@ const sidebar = createSidebar({
     clearSelection,
     clearPreview,
     isNarrowViewport,
+    getSentenceFeedbackNote,
+    submitSentenceFeedback,
+    removeSentenceFeedback,
   },
 });
 const {
@@ -219,6 +222,78 @@ function invalidateSentenceResultsFor(word) {
   }
 }
 const recentDocuments = [];
+
+/* 异常句子标注：意见按“文档|页|句序”缓存，持久化到 data/sentence_feedback.json，
+   供后续批量阅读分析解析与译文质量。 */
+let sentenceFeedbackItems = [];
+let sentenceFeedbackDocKey = null;
+let sentenceFeedbackLoadSerial = 0;
+
+function sentenceFeedbackKey(documentKey, target) {
+  return `${documentKey}|${Number(target.pageNum)}|${Number(target.sentenceIndex)}`;
+}
+
+async function ensureSentenceFeedbackLoaded() {
+  const documentKey = currentDocumentKey;
+  if (sentenceFeedbackDocKey === documentKey) return;
+  const loadId = ++sentenceFeedbackLoadSerial;
+  try {
+    const response = await fetch(`/api/sentence-feedback?document_key=${encodeURIComponent(documentKey)}`);
+    const data = await response.json();
+    if (loadId !== sentenceFeedbackLoadSerial || documentKey !== currentDocumentKey) return;
+    sentenceFeedbackItems = Array.isArray(data.feedbacks) ? data.feedbacks : [];
+  } catch (_ignored) {
+    if (loadId !== sentenceFeedbackLoadSerial || documentKey !== currentDocumentKey) return;
+    sentenceFeedbackItems = [];  // 读取失败按无标注处理，保存路径仍可用
+  } finally {
+    if (loadId === sentenceFeedbackLoadSerial && documentKey === currentDocumentKey) {
+      sentenceFeedbackDocKey = documentKey;
+    }
+  }
+}
+
+function getSentenceFeedbackNote(target) {
+  const item = sentenceFeedbackItems.find((entry) => entry.id === sentenceFeedbackKey(currentDocumentKey, target));
+  return item ? String(item.note || "") : null;
+}
+
+async function submitSentenceFeedback(target, note, snapshot) {
+  const response = await fetch("/api/sentence-feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      document_key: currentDocumentKey,
+      page_num: Number(target.pageNum),
+      sentence_index: Number(target.sentenceIndex),
+      text: target.text,
+      note,
+      qa: snapshot.qa,
+      parse: snapshot.parse,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  const key = sentenceFeedbackKey(currentDocumentKey, target);
+  sentenceFeedbackItems = sentenceFeedbackItems.filter((entry) => entry.id !== key);
+  sentenceFeedbackItems.push(data.feedback);
+  return data.feedback;
+}
+
+async function removeSentenceFeedback(target) {
+  const response = await fetch("/api/sentence-feedback", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      document_key: currentDocumentKey,
+      page_num: Number(target.pageNum),
+      sentence_index: Number(target.sentenceIndex),
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  const key = sentenceFeedbackKey(currentDocumentKey, target);
+  sentenceFeedbackItems = sentenceFeedbackItems.filter((entry) => entry.id !== key);
+}
 
 let currentPdf = null;
 let activeLoadingTask = null;
@@ -1192,6 +1267,8 @@ async function openPdf(file) {
   pages.resetVirtualization();
   clearSentenceMarks();
   currentDocumentKey = `${file.name}:${Number(file.size) || 0}`;
+  sentenceFeedbackDocKey = null;  // 换文档后强制重新拉取标注
+  void ensureSentenceFeedbackLoaded();  // 打开即预取，点击句子时“已标注”状态已就绪
   bookmarkLoadSerial++;
   bookmarkCacheKey = null;
   bookmarkCache = [];

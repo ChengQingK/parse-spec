@@ -49,9 +49,6 @@ BUILTIN: dict[str, dict[str, str]] = {
     "violate": {"zh": "违反；违背", "level": "较难", "note": "不满足协议或规则"},
 }
 
-# 兼容已有导入；内置表只读，自定义内容写入项目根目录 complex_words.json。
-COMPLEX_WORDS = BUILTIN
-
 _WORD = re.compile(r"[A-Za-z][A-Za-z'-]*")
 
 

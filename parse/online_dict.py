@@ -23,6 +23,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from itertools import pairwise
 from pathlib import Path
@@ -405,27 +406,62 @@ class OnlineDictionary:
         return (_now() - fetched).total_seconds() > ttl
 
     def _fetch(self, word: str) -> tuple[str, dict[str, Any] | None]:
-        """按配置顺序查询各源：命中即返回；网络错误熔断该源后继续尝试下一个。"""
-        saw_not_found = False
+        """并发查询各源，任一命中立即返回，避免多源串行叠加超时等待。
+
+        串行回退下“单源超时 × 源数 × 候选词形”会让首次查询等上数秒；改为
+        竞速后最坏等待收敛到单源超时（2.5s）。全部未收录记 not_found，
+        任一网络错误记 error（供缓存 TTL 与调用方降级使用）；失败源照旧
+        熔断跳过一段时间。命中后取消尚未开始的请求，已在网络中的残余连接
+        由各自超时自行收尾，不阻塞本次查询。
+        """
+        sources: list[str] = []
         saw_error = False
         for name in self.sources:
-            fetch = PROVIDERS.get(name)
-            if fetch is None:
-                continue
             if self._cooldown.get(name, 0.0) > time.monotonic():
-                saw_error = True  # 熔断中的源按失败计，整词稍后仍允许重试
-                continue
-            status, result = fetch(word)
+                saw_error = True  # 熔断中的源按网络失败计，整词稍后仍允许重试
+            else:
+                sources.append(name)
+        if not sources:
+            return ("error", None) if saw_error else ("not_found", None)
+        if len(sources) == 1:
+            return self._query_source(sources[0], word)
+
+        pool = ThreadPoolExecutor(max_workers=len(sources), thread_name_prefix="dict")
+        futures = {pool.submit(PROVIDERS[name], word): name for name in sources}
+        hit: tuple[str, dict[str, Any]] | None = None
+        saw_not_found = False
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                status, result = future.result()
+            except Exception:  # 提供方抛出任何异常都按网络失败处理，不穿透到路由
+                status, result = "error", None
             if status == "hit":
-                self._clear_breaker(name)
-                return status, result
+                hit = (name, result)
+                break
             if status == "error":
                 saw_error = True
                 self._trip_breaker(name)
             else:
                 saw_not_found = True
                 self._clear_breaker(name)
+        pool.shutdown(wait=False, cancel_futures=True)
+        if hit is not None:
+            self._clear_breaker(hit[0])
+            return "hit", hit[1]
         return ("not_found", None) if (saw_not_found and not saw_error) else ("error", None)
+
+    def _query_source(self, name: str, word: str) -> tuple[str, dict[str, Any] | None]:
+        """单源查询并维护熔断状态；供只有一个可用源时的快速路径复用。"""
+        try:
+            status, result = PROVIDERS[name](word)
+        except Exception:
+            status, result = "error", None
+        if status == "error":
+            self._trip_breaker(name)
+        else:
+            self._clear_breaker(name)
+        return status, result
 
     def _trip_breaker(self, name: str) -> None:
         with self._lock:

@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
-"""生成一篇示例 SPEC PDF（4 页 + 目录书签），用于演示与端到端回归。"""
+"""生成一篇示例 SPEC PDF（4 页 + 目录书签），用于演示与端到端回归。
+
+用法：python scripts/make_sample.py（在任意工作目录下运行都会写到仓库 docs/）。
+"""
+from pathlib import Path
+
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
 
+
+DEFAULT_OUTPUT = Path(__file__).resolve().parent.parent / "docs" / "sample_spec.pdf"
 
 SECTIONS = [
     ("sec-overview", "Overview and Scope"),
@@ -54,8 +61,10 @@ def draw_body(c, w, h, first_page=False):
             break
 
 
-def main(path="docs/sample_spec.pdf"):
-    c = canvas.Canvas(path, pagesize=letter)
+def main(path=None):
+    target = Path(path) if path else DEFAULT_OUTPUT
+    target.parent.mkdir(parents=True, exist_ok=True)
+    c = canvas.Canvas(str(target), pagesize=letter)
     w, h = letter
     for index, (key, title) in enumerate(SECTIONS):
         if index == 0:
@@ -70,7 +79,7 @@ def main(path="docs/sample_spec.pdf"):
         draw_body(c, w, h, first_page=(index == 0))
         c.showPage()
     c.save()
-    print("已生成:", path)
+    print("已生成:", target)
 
 
 if __name__ == "__main__":

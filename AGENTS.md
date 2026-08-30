@@ -1,11 +1,12 @@
 # AGENTS.md
 
-这里是 **parse-spec** —— 一个英文长难句解析工具：前端用 pdf.js 渲染 SPEC PDF，悬停预览句子范围，单击后调用后端构建逻辑分句树并在持久侧边栏展示。解析、术语与整句翻译**全程本地离线**；唯一例外是右击单词的词典详情（`/api/word-info`）、复杂词添加的释义兜底（`/api/complex-words/suggest` 第四级）与可选的分句树在线精修（`/api/refine`）会联网查询，均带磁盘缓存、熔断与离线降级，绝不阻塞本地解析路径。所有注释与 UI 均为中文。
+这里是 **parse-spec** —— 一个英文长难句解析工具：前端用 pdf.js 渲染 SPEC PDF，悬停预览句子范围，单击后调用后端构建逻辑分句树并在持久侧边栏展示。解析、术语与整句翻译**默认本地执行（本地优先，保证响应速度）**，不强制离线：右击单词的词典详情（`/api/word-info`）、复杂词添加的释义兜底（`/api/complex-words/suggest` 第四级）与可选的分句树在线精修（`/api/refine`）会联网查询，均带磁盘缓存、熔断与离线降级，绝不阻塞本地解析路径；联网仅访问固定词典主机与自配 LLM 端点，注意大陆网络环境下 dictionaryapi.dev 常直连超时（默认有道源优先、多源并发竞速、失败熔断 30 分钟兜底）。所有注释与 UI 均为中文。
 
 ## 运行命令
 
 - 启动服务：`python server.py` → 默认 http://127.0.0.1:5197（Flask，仅绑定本地）；端口不可绑定时自动回退到 5800 等备用端口，以终端打印地址为准。指定端口用环境变量，如 `$env:PARSE_SPEC_PORT=6800`。
-- 生成示例 PDF：`python make_sample.py` → 生成 `docs/sample_spec.pdf`（4 页、每页一个目录书签，用于虚拟化/目录跳转的端到端回归）；`docs/DDR_PHY_Interface_Specification_v5_2.pdf` 是真实 DFI 回归样本，用于验证目录 Link 注解、复杂文本层和长句解析。
+- 生成示例 PDF：`python scripts/make_sample.py` → 生成 `docs/sample_spec.pdf`（4 页、每页一个目录书签，用于虚拟化/目录跳转的端到端回归）；`docs/DDR_PHY_Interface_Specification_v5_2.pdf` 是真实 DFI 回归样本，用于验证目录 Link 注解、复杂文本层和长句解析。
+- 一键启动：双击根目录 `start.bat`（使用 `.venv` 启动服务并自动打开浏览器；`PARSE_SPEC_OPEN_BROWSER=1` 时 server 才会开浏览器，e2e/CI 不受影响）。
 - 初始化环境：`uv venv --python 3.11 .venv`，然后 `uv pip install --python .venv\Scripts\python.exe -r requirements.txt .\vendor\en_core_web_sm-3.8.0-py3-none-any.whl`
 - `server.py` 在直接运行且当前解释器缺 Flask 时，会自动切换到已有的项目 `.venv`；没有 `.venv` 则打印上述安装命令。
 - 完整自测：`.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v`、`npm test`（首次运行前端测试前先 `npm ci` 安装 devDependencies）
@@ -16,7 +17,7 @@
 - 环境：Python 3.11；前端测试要求 Node.js ≥22.13。
 - 前端无构建步骤：`pdfjs-dist@6.2.108` 的模块版运行文件已 vendor 到 `static/pdf.min.mjs` 与 `static/pdf.worker.min.mjs`。升级后运行 `npm run sync:pdfjs`；`npm test` 会先做哈希一致性校验。
 
-## 解析引擎：spaCy（本地离线）
+## 解析引擎：spaCy（本地执行）
 
 `parse_sentence` 的实际解析**已由原纯规则引擎替换为 spaCy**（见 `parse/spacy_parser.py`）：
 
@@ -32,9 +33,9 @@
 - `_fronted_clause_roots`：把模型标成 prep 短语的前置/后置状语恢复为独立分句——"By + 动名词" → `means`（方式手段），"Based on / According to / Depending on + 名词" → `basis`（依据要求）；与依存从句共用同一套编号、排除与父子判定。
 - `_own_tokens` / `_segments`：从节点文本中排除子分句，同时保留精确字符区间；主句允许多个不连续 `segments`。
 - `_grammar`：为每个分句独立提取主语、谓语、宾语、被动执行者、补语、语态、否定和情态。`_phrase` 默认把 `conj`/`cc` 一并纳入（“The DFI signals and the device” 完整显示），定语从句的先行词与缩略定语从句自身主语除外（只取中心名词）。
-- `_marker` / `_relation`：结合依存标签和连接词映射 `main/concession/condition/time/cause/purpose/result/relative/content/complement/basis/means/ambiguous`；不定式目的状语 "To do ..." 的 to 是 aux/TO 依存（不是 mark），同样识别为 `purpose`；多义连接词返回警告。
+- `_marker` / `_relation`：结合依存标签和连接词映射 `main/concession/condition/time/cause/purpose/result/relative/content/complement/basis/means/ambiguous`；不定式目的状语 "To do ..." 的 to 是 aux/TO 依存（不是 mark），同样识别为 `purpose`；`since` 从句在句首或其后紧跟逗号/分号时判 `cause`（`_since_reads_as_cause`，位置特征），其余保持 ambiguous；"such that" 结果状语的 such 常被标成 advmod/amod 而非 mark，`_marker` 会把紧邻 mark "that" 的子节点 "such" 与之合并为复合标记 `such that`（→`result`）；多义连接词返回警告。
 - 模块间使用延迟导入避免循环依赖；`spacy_parser` 顶层不运行时 import `clauser`。
-- **解析质检层（2026-08-29）**：`parse/parse_qa.py` 对构建完成的分句树做确定性"判卷"——强信号（任一命中即判可疑）：句级连接副词（however/therefore/otherwise 等 13 词）无对应分句边界（只认逗号/分号/冒号之后的边界位置，句首语篇副词、instead of、or otherwise、is still 等高频误报族被排除）、模型切出多段独立句根（多个 ROOT）只产出一个分句、含分号未拆并列、单一分句内 ≥2 个"名词主语+限定动词"核心（排除 `=` 等符号动词与带 mark 的从属核心）；弱信号（仅累计）：主句主干缺失、ambiguous 分句过多。`parse_spacy` 先构建基础树，判可疑时依次用 `multiroot`（多段独立句根提升）/`conjadv`（连接副词谓语提升为分句）/`auto` 候选策略重建，选强信号更少的树（平局保持原树）；仍可疑则在 warnings 追加"解析存疑"。连接副词关系映射：however/nevertheless/nonetheless/instead/still→concession，therefore/thus/hence/consequently/accordingly→result，otherwise→condition，moreover/furthermore/meanwhile→ambiguous（带提示）。`_nearest_clause_parent` 对自指根（head 指向自身）返回主句，避免额外句根自指。语料回归：`tests/corpus/spec_sentences.jsonl`，跑批 `python scripts/parse_corpus.py [--model en_core_web_trf] [--strict]`；新坏句子先以宽松期望入库，规则修复后收紧，保证每次迭代的影响面在整份语料上可见。
+- **解析质检层（2026-08-29）**：`parse/parse_qa.py` 对构建完成的分句树做确定性"判卷"——强信号（任一命中即判可疑）：句级连接副词（however/therefore/otherwise 等 13 词）无对应分句边界（只认逗号/分号/冒号之后的边界位置，句首语篇副词、instead of、or otherwise、is still 等高频误报族被排除）、模型切出多段独立句根（多个 ROOT）只产出一个分句、含分号未拆并列、单一分句内 ≥2 个"名词主语+限定动词"核心（排除 `=` 等符号动词与带 mark 的从属核心）；弱信号（仅累计）：主句主干缺失、ambiguous 分句过多。`parse_spacy` 先构建基础树，判可疑时依次用 `multiroot`（多段独立句根提升）/`conjadv`（连接副词谓语提升为分句）/`inverted`（2026-08-30 新增：逗号/分号边界倒挂修复——模型把边界前完整分句挂成边界后主句的 ccomp 时，`_inverted_parallel_root` 找到该分句升为主句、连接副词所在段降为其子分句；`_own_tokens` 与 `_segment_order` 归还嵌套主句子树，segments 与分句排序按阅读顺序）/`conjcl`（2026-08-30 新增：cc+conj 并列限定分句提升为新关系 `conjunct`“并列分句”，链式 conj 递归收集并扁平挂主句，主句剥离悬挂 cc）/`auto` 候选策略重建，选强信号更少的树（平局保持原树）；仍可疑则在 warnings 追加"解析存疑"。连接副词关系映射：however/nevertheless/nonetheless/instead/still→concession，therefore/thus/hence/consequently/accordingly→result，otherwise→condition，moreover/furthermore/meanwhile→ambiguous（带提示）。`_nearest_clause_parent` 对自指根（head 指向自身）返回主句，避免额外句根自指。语料回归：`tests/corpus/spec_sentences.jsonl`，跑批 `python scripts/parse_corpus.py [--model en_core_web_trf] [--strict]`；新坏句子先以宽松期望入库，规则修复后收紧，保证每次迭代的影响面在整份语料上可见。
 
 ## 架构与数据流
 
@@ -83,14 +84,16 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - 悬停只设置 `.is-preview` 浅色高亮，**不请求后端**；单击后设置 `.is-selected` 并调用 `/api/analyze`，结果在右侧栏持久展示。
 - `previewTarget` 与 `selectedTarget` 分离；选中不会随鼠标移开消失。切换句子时移除旧选中类，请求序号阻止旧异步响应覆盖新结果。
 - 分析栏固定在右侧，可收起并保存宽度；目录/书签是左侧独立持久导航栏。窄屏时两种抽屉互斥。
-- 分析栏顶部以横向分段按钮直接提供简洁/标准/详细解析密度与两种逻辑结构展示；主题在下栏切换，不保留独立设置弹层。目录跳转后保持打开并标记活动项。
+- 分析栏顶部以单行横向分段按钮直接提供简洁/标准/详细解析密度与两种逻辑结构展示（“解析”“结构”并排，极窄面板允许折行兜底）；主题在下栏切换，不保留独立设置弹层。目录跳转后保持打开并标记活动项。
 - 下栏显示当前页/总页数和 75%–200% PDF 缩放；`Ctrl` + 滚轮也可缩放。缩放时点击命中坐标按缩放比例还原。
-- 书签支持创建时自定义名称及后续重命名，仍统一写入根目录 `bookmarks.json`。
+- 书签支持创建时自定义名称及后续重命名，仍统一写入 `data/bookmarks.json`。
 - 术语表支持删除自定义词条；每次修改/删除/恢复前自动备份到 `backups/glossary/`，也支持手动备份、恢复、导出和删除备份；最多保留 30 份。
-- “复杂词”指较难理解的单个通用英文单词，由 `parse/complex_words.py` 的内置表与根目录 `complex_words.json` 的用户表共同识别；顶栏复杂词表支持增删改查，分析原文支持右击单词快速添加，并按复杂词表、术语表、本地翻译词典的顺序自动填写释义。不要再把固定词组显示为复杂词。译文中仍为英文且存在释义的词可点击原位切换为中文。
+- “复杂词”指较难理解的单个通用英文单词，由 `parse/complex_words.py` 的内置表与 `data/complex_words.json` 的用户表共同识别；顶栏复杂词表支持增删改查，分析原文支持右击单词快速添加，并按复杂词表、术语表、本地翻译词典的顺序自动填写释义。不要再把固定词组显示为复杂词。译文中仍为英文且存在释义的词可点击原位切换为中文。
 - `Esc`、关闭按钮或顶栏收起会清除选中并关闭分析栏；拖选文字时 `hasTextSelection()` 抑制句子选择。
 - 树节点悬停时使用后端 `segments` 在右栏原句中精确标记对应片段；PDF 文本层仍保持整句高亮，避免破坏原生复制。
 - 树节点与核心命题卡片中的超长引号标题（如 Figure 图题，>6 词）折叠为 `“前 6 个词 …”` 并以 `title` 属性携带全文（悬停可读）；原句卡片、原文联动高亮与字符区间 `segments` 始终保持完整不变。
+- “解析存疑”徽章是可点击按钮：点击展开质检信号明细卡（逐条列出 `qa.signals`），再次点击收起；默认折叠，不再依赖悬停 title。
+- “标注异常”按钮位于句元信息下方：点击展开意见表单（说明+保存/删除/取消），保存后按钮变“已标注”并回显；数据经 `/api/sentence-feedback` 持久化到 `data/sentence_feedback.json`，文档打开时预取回显状态，供离线批量分析解析与译文质量。
 
 ## 核心接口
 
@@ -100,7 +103,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 - `parse_sentence` 优先走 spaCy，不可用则返回同构的 `rule-fallback` 树；`term_candidates` 是仅供后端词典抽取使用的原词/lemma 对。
 - `parse/spacy_parser.py` → `parse_spacy(text) -> ParsedSentence | None`；模块级 `_SPACY_OK` 指示模型是否就绪。
 - `parse/glossary.py` → `Glossary.lookup(word) -> dict | None`；**未命中返回 `None`**（调用方应做"未收录"兜底）。
-  - `BUILTIN` 内置词典 + 可选用户词典 `glossary.json`（用户优先级高）；服务按 mtime/大小自动热重载并清除旧分析缓存。
+  - `BUILTIN` 内置词典 + 可选用户词典 `data/glossary.json`（用户优先级高）；服务按 mtime/大小自动热重载并清除旧分析缓存。
 - `parse/translator.py` → `translate_sentence(parsed, glossary)`；返回完整和逐分句的本地结构辅助译文，明确附带能力边界警告。
 
 ## API 契约（POST `/api/analyze`）
@@ -109,9 +112,10 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 
 - `/api/glossary`：术语表 GET/POST/DELETE，及 `/api/glossary/backups`（备份列表/创建/读取/删除）和 `/api/glossary/restore`（恢复）。
 - `/api/complex-words`：复杂词表 GET/POST/DELETE，及 `/api/complex-words/suggest`（添加时按复杂词表→术语表→本地翻译词典顺序建议释义，本地均未命中时再用在线词典的中文释义兜底）。
-- `/api/bookmarks`：书签 GET/POST，统一持久化到根目录 `bookmarks.json`。
-- `/api/word-info`：在线词典详情（音标/在线中文释义/词性/英文释义/双语例句/同义词/搭配），由 `parse/online_dict.py` 多源查询——默认有道（youdao）优先、dictionaryapi.dev（freeapi）回退，`PARSE_SPEC_DICT_SOURCES` 环境变量可调整顺序；单源网络失败会熔断跳过 30 分钟，避免每次查询都等待超时。2.5s 超时、内存+`word_cache.json` 磁盘正负缓存（命中永久有效、未收录 24h、网络错误 1h TTL）；失败返回 404，前端回退为仅显示本地释义。整句翻译路径不经过此端点。
-- `/api/refine`：可选的在线分句树精修（`parse/llm_refine.py`）。前端在本地结果渲染后异步调用，主解析路径零等待；未配置 `PARSE_SPEC_LLM_BASE_URL` / `PARSE_SPEC_LLM_API_KEY` 时返回 404，前端静默保留本地结果。LLM 走 OpenAI 兼容端点（`PARSE_SPEC_LLM_MODEL` 默认 glm-4-flash，`PARSE_SPEC_LLM_TIMEOUT` 默认 6s），只允许 https 公网或回环 http、拒绝重定向、响应封顶 4MB；分句文本必须是原句精确子串，任一分句定位失败即整体弃用。`parse_cache.json` 磁盘正负缓存（命中永久、错误 1h）+ 连续失败 3 次熔断 30 分钟；精修结果带 `refined_by: <模型名>` 字段，侧栏显示“在线精修”徽标。
+- `/api/bookmarks`：书签 GET/POST，统一持久化到 `data/bookmarks.json`。
+- `/api/sentence-feedback`：异常句子标注 GET/POST/DELETE，持久化到 `data/sentence_feedback.json`。前端在分析栏提供"标注异常"按钮，读者可附注意见标记读不通/解析可疑的句子；POST 按文档+页+句序 upsert，同时保存原句文本与质检/分句关系快照（qa.signals、relations），供离线批量分析改进解析与译文。
+- `/api/word-info`：在线词典详情（音标/在线中文释义/词性/英文释义/双语例句/同义词/搭配），由 `parse/online_dict.py` 多源并发竞速查询——默认有道（youdao）与 dictionaryapi.dev（freeapi）同时发起、任一命中立即返回，`PARSE_SPEC_DICT_SOURCES` 环境变量可调整参与源；单源网络失败会熔断跳过 30 分钟，避免每次查询都等待超时。2.5s 超时、内存+`data/word_cache.json` 磁盘正负缓存（命中永久有效、未收录 24h、网络错误 1h TTL）；失败返回 404，前端回退为仅显示本地释义。整句翻译路径不经过此端点。
+- `/api/refine`：可选的在线分句树精修（`parse/llm_refine.py`）。前端在本地结果渲染后异步调用，主解析路径零等待；未配置 `PARSE_SPEC_LLM_BASE_URL` / `PARSE_SPEC_LLM_API_KEY` 时返回 404，前端静默保留本地结果。LLM 走 OpenAI 兼容端点（`PARSE_SPEC_LLM_MODEL` 默认 glm-4-flash，`PARSE_SPEC_LLM_TIMEOUT` 默认 6s），只允许 https 公网或回环 http、拒绝重定向、响应封顶 4MB；分句文本必须是原句精确子串，任一分句定位失败即整体弃用。`data/parse_cache.json` 磁盘正负缓存（命中永久、错误 1h）+ 连续失败 3 次熔断 30 分钟；精修结果带 `refined_by: <模型名>` 字段，侧栏显示“在线精修”徽标。
 
 `POST /api/analyze` 请求：
 ```json
@@ -139,19 +143,22 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 }
 ```
 
-`translation` 由完全离线的结构翻译器生成，属于辅助译文而非生成式模型输出；`terms`、`complex_words` 和 `warnings` 可能为空数组。复杂词由 `parse/complex_words.py` 的内置阅读词表、项目根目录 `complex_words.json` 的用户词表及 spaCy lemma 共同识别。`qa` 是解析质检层的判卷结果（`suspicious` 为 true 时前端显示"解析存疑"徽标并提示复核）。`/api/refine` 返回的 `result` 与本契约同构，额外带 `refined_by` 字段。
+`translation` 由结构翻译器在本地生成（属辅助译文而非生成式模型输出，不依赖网络）；`terms`、`complex_words` 和 `warnings` 可能为空数组。复杂词由 `parse/complex_words.py` 的内置阅读词表、`data/complex_words.json` 的用户词表及 spaCy lemma 共同识别。`qa` 是解析质检层的判卷结果（`suspicious` 为 true 时前端显示"解析存疑"徽标，点击展开信号明细）。`/api/refine` 返回的 `result` 与本契约同构，额外带 `refined_by` 字段。
 
 ## 已知坑
 
-- `glossary.json` 位于项目根目录，格式 `{ "word": { "pos": ..., "zh": ..., "note": ... } }`；用户词条优先于 `BUILTIN`，保存后下一次请求自动重载。
+- `data/glossary.json` 存放用户术语表（2026-08-30 起从项目根目录迁入 `data/`，server 启动时自动迁移旧文件），格式 `{ "word": { "pos": ..., "zh": ..., "note": ... } }`；用户词条优先于 `BUILTIN`，保存后下一次请求自动重载。
 - spaCy 路径用 tokenizer 与 lemma 抽取术语；规则降级路径仍依赖正则候选和 `Glossary.lookup` 的轻量后缀还原。
 - 跨页合并是保守启发式：下一页以专有名词或大写缩写续接时可能只给出“疑似截断”提示；表格和 PDF 自身错误阅读顺序仍可能误切。
-- `/api/word-info` 依赖在线词典（有道 + dictionaryapi.dev）：全部源失败或未收录时详情区显示“在线详情不可用”；解析译文中的中文释义始终来自本地词表，不受网络影响（复杂词添加弹层里的“在线中文”释义除外，会明确标注来源）。`word_cache.json` 是运行期缓存，不提交 Git。
-- `/api/refine` 的精修质量取决于所配 LLM；校验层只保证分句文本逐字符来自原句，不保证逻辑关系标注正确，`warnings` 中始终注明“在线模型精修”。`parse_cache.json` 是运行期缓存，不提交 Git；`vendor/en_core_web_trf-*.whl`（437MB）同样不入库，经 `scripts/fetch_models.py` 下载。
+- `/api/word-info` 依赖在线词典（有道 + dictionaryapi.dev）：全部源失败或未收录时详情区显示“在线详情不可用”；解析译文中的中文释义始终来自本地词表，不受网络影响（复杂词添加弹层里的“在线中文”释义除外，会明确标注来源）。首次查询某词需要联网等待（多源并发竞速已把最坏等待收敛到单源超时 2.5s），命中后走缓存。`data/word_cache.json` 是运行期缓存，不提交 Git。
+- `/api/refine` 的精修质量取决于所配 LLM；校验层只保证分句文本逐字符来自原句，不保证逻辑关系标注正确，`warnings` 中始终注明“在线模型精修”。`data/parse_cache.json` 是运行期缓存，不提交 Git；`vendor/en_core_web_trf-*.whl`（437MB）同样不入库，经 `scripts/fetch_models.py` 下载。
 - 页面虚拟化以占位高度估算滚动位置，极端变高页的滚动锚点在挂载/卸载瞬间可能有轻微偏移；`page.cleanup()` 后重渲依赖 pdf.js 重新解析，超大页重渲仍有成本。
 
 ## 变更记录（2026-08）
 
+- 2026-08-30（续 2）：SPEC 全量语料迭代与仓库整理——①**扫描工具**：新增 `scripts/scan_spec_corpus.py`（pypdf 抽取 SPEC 目录 PDF 句料 → `clauser.split_sentences` 断句 → 全量解析，仅落盘“待审”句子：质检可疑/含 ambiguous/带警告/解析降级），7 份 LPDDR 规格 16517 句扫描出 2300 条待审。②**解析修复**（trf 重放 qa-suspicious 修复率 97%，69→2，剩余为 PDF 抽取噪声）：`semicol` 策略泛化为 `inverted`（逗号/分号边界 + however/therefore 段 ccomp 倒挂，finite 检查纳入 VB do-support 句）；新增 `conjcl` 策略与新关系 `conjunct`“并列分句”（cc+conj 限定分句提升、链式 conj 递归收集、扁平挂主句、主句剥离悬挂 and/or/but）；parse_qa 降噪——`pcomp` 介词宾语从句计入从属链（补 token 自身 dep 检查）、`instead of` 显式排除、前后双逗号插入语 however 排除（“X; therefore, Y” 的句副词逗号不误杀）、分号漏拆信号要求两侧片段均含限定动词。语料新增 6 条（总量 12），sm/trf 双跑全过。③**工程化**：根目录新增 `start.bat` 一键启动（`PARSE_SPEC_OPEN_BROWSER=1` 时 server 就绪后自动开浏览器，e2e/CI 不受影响）；`make_sample.py` 迁入 `scripts/` 并改为仓库相对路径；清理死代码（`complex_words.COMPLEX_WORDS` 兼容别名、未用的 `Callable` 导入）；文档“全程本地离线”放宽为“本地优先”，注明大陆网络下词典源的超时降级策略。测试数 93（Python）+ 49（Node）+ 6（e2e）。
+- 2026-08-30（续）：DFI SDR 句三项整改（源自“辅助译文难读、i.e. 未解释、缺异常标注入口”反馈）——①**解析修复**：新增 `semicol` 候选策略，修复分号+连接副词倒挂（模型把分号前完整分句挂成分号后主句的 ccomp，质检报“连接副词 therefore 无边界”），分号前分句升为主句、therefore 段降为结果从句；`_own_tokens` 归还嵌套主句子树、`_segment_order` 按阅读顺序排序；语料新增 `dfi-sdr-2n-semicolon-therefore`（trf 门控）。该策略后泛化更名为 `inverted`（见 2026-08-30（续 2））。②**缩写支持**：翻译器 `_TOKEN` 把 `i.e.`/`e.g.` 识别为整体 token（修复前被切碎成 i/./e/.，句点变中文句号且术语查不到）、`2N`/`011b` 等“数字+字母”复合词不再拆分；glossary BUILTIN 新增 i.e./e.g./etc/phase/bus/width，`term_candidates` 放宽 is_alpha 过滤使含点/下划线 token 可进术语区——用户把 i.e. 加进术语表现在真正生效。③**译文可读性**：所有格 `DRAM's`→`DRAM 的`；系动词 is/are/was/were 补译“是”（等式句不再缺主系表）；`_WORDS` 新增 lower/upper/sent/phase/single/rate/width/bus；短语表新增 single/double data rate、split across、sent in the first/second phase。④**异常句子标注**：分析栏新增“标注异常”按钮+意见表单，新端点 `/api/sentence-feedback`（GET/POST/DELETE）持久化到 `data/sentence_feedback.json`（同文档同句 upsert，附原句文本与 qa/分句关系快照；标注数据仅存本机 data/ 目录，gitignore 不入库，不经任何对外请求外发），文档打开时预取回显“已标注”状态；新增 e2e 回环测试（保存→重开回显→删除清理）。测试数 90（Python）+ 49（Node）+ 6（e2e）。
+- 2026-08-30：六项使用反馈整改——①**解析修复**：`_marker` 识别 "such that" 复合标记（模型把 such 标成 advmod/amod 时不再只取 that），`_relation` 新增 `_since_reads_as_cause`（句首或紧跟逗号/分号的 since 从句判 `cause`），DFI LPDDR5 "Since the dfi_address … concatenated such that …" 句由 2×"待确认从句" 修复为 主句+原因+结果，语料新增 `dfi-lpddr5-ca-concat`（sm/trf 双跑全过）；②**用户数据归拢**：书签/术语/复杂词/翻译语料与运行缓存 JSON 统一迁入 `data/` 目录，server 启动时自动把根目录旧文件搬入（新位置已存在则不动），`.gitignore` 改为忽略整个 `/data/`，`translation_corpus.default_corpus()` 同步指向 `data/`，相关提示文案与弹窗按钮更新为 data/ 路径；③**解析存疑明细可见化**：QA 徽章改为可点击按钮（`qa-badge-toggle`），点击展开 `qa-detail` 明细卡逐条列出 `qa.signals`，默认折叠不再依赖悬停 title；④**设置并排**：分析栏“解析”“结构”两组分段按钮合并为一行（极窄面板 flex-wrap 兜底），减少纵向占位；⑤**在线词典并发竞速**：`OnlineDictionary._fetch` 由多源串行回退改为 ThreadPoolExecutor 并发竞速、任一命中立即返回并取消其余请求，最坏等待从“单源超时×源数×候选词形”收敛到单源超时 2.5s，熔断/TTL 语义不变；⑥**杂项归位**：开发诊断脚本迁至 `scripts/diag_file_server.py`（支持目录/端口参数），`static/diag_dfi.pdf` 确认为 `docs/DDR_PHY_Interface_Specification_v5_2.pdf` 的字节级重复副本（sha256 相同）后删除。测试数 80（Python）+ 48（Node）+ 5（e2e）。
 - 2026-08-29：分句树质量三层整改（源自“待确认过多、To xxx 前置成分未拆”调查）——①**规则层**：`_marker`/`_relation` 识别不定式目的状语（“To do ...” 的 to 是 aux/TO 依存 → `purpose`，消灭最大宗的“关系待确认”）；新增 `_is_spurious_as_adverbial` 伪从句过滤（“treat as reserved” 的 as+分词补语不再被拆成独立分句）；新增 `_fronted_clause_roots` 把模型标成 prep 短语的 “By + 动名词”（→`means` 方式手段）与 “Based on/According to + 名词”（→`basis` 依据要求）恢复为独立分句，“Based on ..., one of ... is selected” 类主从颠倒被同步修复；②**模型层**：`PARSE_SPEC_SPACY_MODEL` 可选模型，`scripts/fetch_models.py` 下载官方 `en_core_web_trf`（GitHub 直连失败自动走 hf-mirror.com，sha256 校验；PyPI 同名包是占位假包），server 启动自动优先 trf 并经 `spacy_worker.warmup` 后台预热；③**在线精修层**：新增 `parse/llm_refine.py` 与 `POST /api/refine`（OpenAI 兼容端点、环境变量配置、精确子串校验、磁盘正负缓存 + 熔断），前端本地结果渲染后异步精修替换并显示徽标，未配置时 404 静默降级。`ParsedSentence` 新增 `refined_by` 字段；前端新增 `means` 关系标签与精修徽标样式。测试数 64（Python）+ 46（Node）+ 4（e2e）。
 - 2026-08-29（续）：DFI 2.3.3 并列主语句回归——`_phrase` 把 `conj`/`cc` 纳入短语提取，修复并列主语只显示第一个并列项的截断（“The DFI signals and the device” 此前只显示 “The DFI signals”）；定语从句的先行词与缩略定语从句自身主语仍只取中心名词，避免把并列的另一主语误计入从句。
 - 2026-08-29（续 2）：展示层引号标题折叠（选定方案A，展示不变数据）——`viewer_sidebar.js` 新增 `foldLongQuotedTitles`/`foldedClauseHtml`，嵌套树节点、聚焦卡、联动树节点与简洁模式核心命题卡中超长引号标题（>24 字符且 >6 词）折叠为 `“前 6 词 …”`，折叠节点带 `title` 全文悬停展开；原句卡片、原文联动高亮与 `segments` 不变。解析层遮蔽（方案B）经实测在 trf 下无任何输出差异，未采用。
@@ -181,7 +188,7 @@ PDF ──(pdf.js 前端)──> 词坐标 ──> 前端聚类成句子 ──P
 ### 做得好的地方
 
 - **职责分离干净**：坐标权威全在前端，后端只做纯文本分析；schema v3 将树结构、丰富语法、术语和本地译文分开。
-- **离线优先**：spaCy 本地模型 + vendor 的 pdf.js，无外部网络依赖，隐私与可用性都好；解析引擎带纯规则回退，健壮。
+- **本地优先**：spaCy 本地模型 + vendor 的 pdf.js，主路径零网络等待，隐私与可用性都好；联网仅限词典详情与可选精修等增强，且带缓存/熔断/降级；解析引擎带纯规则回退，健壮。
 - **零构建、零部署成本**：单个 Flask 入口 + 静态文件，`python server.py` 即可运行，适合个人本地工具。
 - **阅读交互稳定**：透明文本层保留复制；悬停不触发解析，单击结果持久显示，避免浮层遮挡正文或吞掉指针。
 

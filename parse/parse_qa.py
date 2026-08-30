@@ -46,10 +46,25 @@ _CONJ_ADVERB_PATTERN = re.compile(
 _FINITE_TAGS = {"VBZ", "VBD", "VBP"}
 
 # 与 spacy_parser._CLAUSE_DEPS 同义的从句依存集合；本模块不导入 spacy_parser 以避免循环依赖。
-_SUBORDINATE_DEPS = {"relcl", "advcl", "ccomp", "xcomp", "csubj", "acl"}
+# pcomp：介词宾语从句（“an illustration of how the PHY interprets ...”）也属从属核心。
+_SUBORDINATE_DEPS = {"relcl", "advcl", "ccomp", "xcomp", "csubj", "acl", "pcomp"}
+
+
+def _semicolon_segments(text: str) -> list[tuple[int, int]]:
+    """按分号把句子切成字符区间（含首尾段），供两侧限定动词检查。"""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for match in re.finditer(";", text):
+        spans.append((start, match.start()))
+        start = match.end()
+    spans.append((start, len(text)))
+    return spans
 
 
 def _inside_subordinate_clause(token: Any) -> bool:
+    # 自身就是从句根（如 prep 宾语从句的 pcomp 动词）时直接判定为从属
+    if token.dep_.split(":", 1)[0] in _SUBORDINATE_DEPS:
+        return True
     current = token.head
     seen: set[int] = set()
     while current.i not in seen and current.head.i != current.i:
@@ -83,12 +98,34 @@ def assess(text: str, parsed: Any, doc: Any = None) -> dict:
         before = (text or "")[: match.start()].rstrip()
         if not before.endswith((",", ";", ":")):
             continue
+        # “instead of” 是介词短语而非分句边界，位置条件无法排除它，显式跳过
+        if lower == "instead" and (text or "")[match.end():].lstrip().lower().startswith("of"):
+            continue
+        # “If, however, the ODT_CA ...” 的插入语结构：连接副词前后都是逗号，
+        # 它只是句中评注，不是分句边界。“X; therefore, Y” 中 therefore 后的
+        # 逗号是句副词的常规标点，不能按插入语跳过。
+        if before.endswith(",") and (text or "")[match.end():].lstrip().startswith(","):
+            continue
         strong.append(f"连接副词 “{lower}” 在句中但没有对应的分句边界")
         break
 
-    # 技术文档里分号几乎总是并列独立分句的边界。
+    # 技术文档里分号几乎总是并列独立分句的边界，但省略片段与表格噪声
+    # （分号后是名词短语，无限定动词）不是；要求两侧都含限定动词才报。
     if ";" in (text or "") and len(clauses) <= 1:
-        strong.append("句子包含分号但没有拆分出并列分句")
+        if doc is None:
+            strong.append("句子包含分号但没有拆分出并列分句")
+        else:
+            segments = _semicolon_segments(text or "")
+            finite_ranges = [
+                (token.idx, token.idx + len(token.text))
+                for token in doc
+                if token.tag_ in _FINITE_TAGS and token.is_alpha
+            ]
+            if all(
+                any(start >= seg_start and end <= seg_end for start, end in finite_ranges)
+                for seg_start, seg_end in segments
+            ):
+                strong.append("句子包含分号但没有拆分出并列分句")
 
     if doc is not None:
         root_tokens = [token for token in doc if token.dep_ == "ROOT"]

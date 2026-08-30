@@ -110,6 +110,12 @@ whereas\tconj.\t而/鉴于\t对比两个情况，也见于法律或规范
 notwithstanding\tprep./adv.\t尽管/即便如此\t表示让步，不受前述影响
 instead\tadv.\t相反/作为替代\t而不是前述方案
 otherwise\tadv.\t否则/在其他情况下\t若不如此
+i.e.\tabbr.\t即\t拉丁 id est 缩写，等于 that is，引出解释或等价说法
+e.g.\tabbr.\t例如\t拉丁 exempli gratia 缩写，等于 for example，用于举例
+etc\tabbr.\t等等\t拉丁 et cetera 缩写，表示列举未尽
+phase\tn.\t相位\t一个时钟周期内的数据节拍，DFI 每个 phase 传输一次
+bus\tn.\t总线\t多根信号线组成的共享传输通道
+width\tn.\t宽度\t总线或字段的位宽
 """.strip()
 
 

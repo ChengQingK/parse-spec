@@ -62,6 +62,7 @@ _LABELS = {
     "complement": "补充说明",
     "basis": "依据要求",
     "means": "方式手段",
+    "conjunct": "并列分句",
     "ambiguous": "关系待确认",
 }
 
@@ -127,6 +128,85 @@ def _fronted_clause_roots(doc: Any, main_root: Any) -> list[tuple[Any, str, str,
     return result
 
 
+def _inverted_parallel_root(doc: Any, main_root: Any) -> Any | None:
+    """逗号/分号 + 连接副词的主从倒挂：返回边界前那段的分句根（应升为主句）。
+
+    分号不被模型当作句边界（只是 punct），逗号+连接副词也有同样问题：模型
+    偶尔把边界前的完整分句挂成边界后主句的 ccomp，主从因此倒挂，质检会报
+    “连接副词无对应分句边界”。此时边界前分句才是真正的主命题，连接副词
+    所在的边界后段应降为其子分句，关系由连接词映射（therefore→result、
+    however→concession 等）给出。
+    """
+    for child in main_root.children:
+        if child.dep_.split(":", 1)[0] not in _CLAUSE_DEPS:
+            continue
+        subtree = list(child.subtree)
+        if not subtree or not any(
+            token.tag_ in {"VBZ", "VBD", "VBP", "VB"} and token.pos_ in {"VERB", "AUX"}
+            for token in subtree
+        ):
+            continue
+        last = max(subtree, key=lambda token: token.i)
+        boundary = doc[last.i + 1] if last.i + 1 < len(doc) else None
+        if boundary is None or boundary.text not in {",", ";", "；"}:
+            continue
+        follower = doc[last.i + 2] if last.i + 2 < len(doc) else None
+        if follower is not None and follower.lower_ in parse_qa.CONJ_ADVERBS:
+            return child
+    return None
+
+
+def _conjunct_clause_roots(doc: Any, main_root: Any, taken: set[int]) -> list[Any]:
+    """主句谓语的 cc+conj 并列分句：conj 子树自带主语且为限定动词时提升。
+
+    “In 1N mode, this is X and in 2N mode, this is Y” 中第二个 is 是主句
+    谓语的 conj（自带 nsubj），模型不会把它送进 _CLAUSE_DEPS，于是整句只有
+    一个分句，质检报“多个独立主谓核心疑似漏拆”。cc 可能挂在链式并列的
+    中间项上、conj 也可能链式嵌套（A and B and C 的 C 挂在 B 下），因此
+    has_cc 检查与收集都沿 conj 链进行。
+    """
+    conjuncts = [
+        child for child in main_root.children if child.dep_.split(":", 1)[0] == "conj"
+    ]
+    if not conjuncts:
+        return []
+    has_cc = any(
+        item.dep_.split(":", 1)[0] == "cc"
+        for item in (
+            *main_root.children,
+            *(grand for conj in conjuncts for grand in conj.children),
+        )
+    )
+    if not has_cc:
+        return []
+    result: list[Any] = []
+    frontier = list(conjuncts)
+    while frontier:
+        child = frontier.pop()
+        if child.i in taken:
+            continue
+        finite = child.tag_ in {"VBZ", "VBD", "VBP"} or (
+            child.tag_ == "VB"
+            and any(
+                grand.dep_.split(":", 1)[0] in {"aux", "auxpass"}
+                for grand in child.children
+            )
+        )
+        has_subject = any(
+            grand.dep_.split(":", 1)[0] in {"nsubj", "nsubjpass", "csubj"}
+            for grand in child.children
+        )
+        if finite and has_subject:
+            result.append(child)
+            taken.add(child.i)
+        frontier.extend(
+            grand
+            for grand in child.children
+            if grand.dep_.split(":", 1)[0] == "conj" and grand.pos_ in {"VERB", "AUX"}
+        )
+    return result
+
+
 def _main_root(doc: Any, prefer_first_root: bool = False) -> Any | None:
     # 模型把一句话切成多段（逗号+连接副词常见）时会出现多个 ROOT：
     # 第一段就是主句，直接采用；单 ROOT 的小模型名词误标仍走修复链。
@@ -170,6 +250,25 @@ def _clause_roots(doc: Any, main_root: Any, strategy: str = "base") -> list[Any]
     # 候选策略：质检层判可疑后尝试的补充分句边界。只在主句子树内生效，
     # 避免把定语从句内部的连接副词误提为顶级分句。
     taken = {main_root.i, *(root.i for root in roots)}
+    if strategy == "inverted":
+        # 逗号/分号后紧跟连接副词：其挂靠的分句根（常为整句 ROOT）提升为独立分句，
+        # 与边界前那段（此时作为 main_root 传入）构成“主句 + 结果/让步”结构。
+        for token in doc:
+            if (
+                token.lower_ in parse_qa.CONJ_ADVERBS
+                and token.dep_.split(":", 1)[0] in {"advmod", "cc"}
+                and token.i > 0
+                and doc[token.i - 1].text in {",", ";", "；"}
+                and token.head.i not in taken
+                and token.head.i != main_root.i
+                and token.head.pos_ in {"VERB", "AUX"}
+            ):
+                roots.append(token.head)
+                taken.add(token.head.i)
+        return roots
+    if strategy == "conjcl":
+        roots.extend(_conjunct_clause_roots(doc, main_root, taken))
+        return roots
     if strategy in {"multiroot", "auto"}:
         for token in doc:
             if token.dep_ == "ROOT" and token.i not in taken:
@@ -215,11 +314,35 @@ def _marker(token: Any, source: str) -> str:
     if not candidates:
         return ""
     first = candidates[0]
+    # “such that” 结果状语：such 与 that 同为分句根的直接子节点（模型常把
+    # such 标成 advmod/amod 而非 mark），只取 that 会把整体标记误报为 that。
+    if first.lower_ == "that" and first.i > 0:
+        previous = token.doc[first.i - 1]
+        if previous.lower_ == "such" and previous.head.i == token.i:
+            return "such that"
     tail = source[first.idx : _subtree_bounds(token)[1]].lower()
     for phrase in ("in order that", "as soon as", "even though", "even if", "so that", "such that"):
         if tail.startswith(phrase):
             return source[first.idx : first.idx + len(phrase)]
     return first.text
+
+
+def _since_reads_as_cause(token: Any) -> bool:
+    """句首或其后紧跟逗号/分号的 since 从句在技术文档中几乎总是原因状语。
+
+    “Since the dfi_address is a single phase signal, ...” 是规范文档的高频
+    句式；表时间的 since 通常后接时间点且不满足这两个位置特征，保持
+    ambiguous 提示人工确认。
+    """
+    subtree = list(token.subtree)
+    if not subtree:
+        return False
+    doc = token.doc
+    first_i = min(item.i for item in subtree)
+    last_i = max(item.i for item in subtree)
+    if first_i == 0:
+        return True
+    return last_i + 1 < len(doc) and doc[last_i + 1].text in {",", ";"}
 
 
 def _relation(token: Any, marker: str) -> tuple[str, list[str]]:
@@ -256,7 +379,12 @@ def _relation(token: Any, marker: str) -> tuple[str, list[str]]:
     ):
         return "basis", []
     if lower in {"since", "while", "as"}:
+        if lower == "since" and _since_reads_as_cause(token):
+            return "cause", []
         return "ambiguous", [f"{marker} 可能表达多种逻辑关系，需要结合语境确认"]
+    if dep == "conj":
+        # 仅 conjcl 策略会把 conj 有限分句提升为分句根；base 树不含 conj 根
+        return "conjunct", []
     return "ambiguous", ["未能从连接词确定该分句的逻辑关系"]
 
 
@@ -312,6 +440,17 @@ def _own_tokens(
             continue
         if _is_descendant(child_root, root, clause_roots, main_root, elevated_indexes):
             excluded.update(token.i for token in child_root.subtree)
+            # 并列分句被提升后，主句里只剩悬挂的 and/or/but：把协调它的 cc 一并剥离
+            if child_root.dep_.split(":", 1)[0] == "conj" and child_root.subtree:
+                cursor = min(token.i for token in child_root.subtree) - 1
+                while cursor >= 0 and doc[cursor].dep_.split(":", 1)[0] == "punct":
+                    cursor -= 1
+                if cursor >= 0 and doc[cursor].dep_.split(":", 1)[0] == "cc" and doc[cursor].head.i == root.i:
+                    excluded.add(doc[cursor].i)
+            # 倒挂修复：子分句根（边界后段）的依存子树覆盖了整个句子，
+            # 其中嵌着真正的 main_root；主句自己的子树要重新从排除集里归还。
+            if any(token.i == main_root.i for token in child_root.subtree):
+                excluded.difference_update(token.i for token in main_root.subtree)
     if root.i != main_root.i:
         candidate_indexes = {token.i for token in candidates}
         for conjunct in elevated_main:
@@ -320,6 +459,10 @@ def _own_tokens(
             excluded.update(token.i for token in conjunct.subtree)
             if conjunct.i > 0 and doc[conjunct.i - 1].lower_ in {"and", "or", "but"}:
                 excluded.add(conjunct.i - 1)
+        # 同一倒挂场景下，非主句根（分号后段）的子树也覆盖 main_root，
+        # 需要把主句子树整体排除，才能只留下自己那一段。
+        if main_root.i in candidate_indexes:
+            excluded.update(token.i for token in main_root.subtree)
     return [token for token in candidates if token.i not in excluded]
 
 
@@ -634,7 +777,19 @@ def _build_tree(doc: Any, source: str, main_root: Any, strategy: str, ClauseNode
     # 规则恢复的前置状语与依存从句共用同一套编号、排除与父子判定。
     all_roots = roots + [item[0] for item in fronted_roots]
     bounds = {root.i: _subtree_bounds(root) for root in all_roots}
-    all_roots.sort(key=lambda token: bounds[token.i])
+
+    def _segment_order(root: Any) -> int:
+        """分句排序键：倒挂根（子树覆盖全句的 semicol 修复段）取去除嵌套
+        主句子树后的首个 token，保证 id 与展示顺序符合阅读顺序。"""
+        subtree_min = min(token.i for token in root.subtree)
+        if root.i == main_root.i:
+            return subtree_min
+        if any(token.i == main_root.i for token in root.subtree):
+            nested_ids = {token.i for token in main_root.subtree}
+            return min(token.i for token in root.subtree if token.i not in nested_ids)
+        return subtree_min
+
+    all_roots.sort(key=_segment_order)
     root_ids = {main_root.i: "c0"}
     root_ids.update({root.i: f"c{index}" for index, root in enumerate(all_roots, start=1)})
 
@@ -691,7 +846,7 @@ def _build_tree(doc: Any, source: str, main_root: Any, strategy: str, ClauseNode
                 ClauseNode(
                     id=root_ids[root.i],
                     parent_id="c0",
-                    order=min((token.i for token in root.subtree), default=root.i),
+                    order=_segment_order(root),
                     text=_display_text(source, own_segments) or source[start:end].strip(" ,;"),
                     start=start,
                     end=end,
@@ -709,11 +864,13 @@ def _build_tree(doc: Any, source: str, main_root: Any, strategy: str, ClauseNode
         marker = _marker(root, source)
         relation, warnings = _relation(root, marker)
         parent_root = _nearest_clause_parent(root, all_roots, main_root, elevated_indexes)
+        if strategy == "conjcl" and root.dep_.split(":", 1)[0] == "conj":
+            parent_root = main_root  # 并列分句扁平挂主句，链式 conj 不互相嵌套
         nodes.append(
             ClauseNode(
                 id=root_ids[root.i],
                 parent_id=root_ids.get(parent_root.i, "c0"),
-                order=min((token.i for token in root.subtree), default=root.i),
+                order=_segment_order(root),
                 text=_display_text(source, own_segments) or source[start:end].strip(" ,;"),
                 start=start,
                 end=end,
@@ -760,7 +917,9 @@ def _build_tree(doc: Any, source: str, main_root: Any, strategy: str, ClauseNode
         term_candidates=[
             (token.text, token.lemma_.lower())
             for token in doc
-            if token.is_alpha and not token.is_space
+            # is_alpha 会把 i.e. / dfi_address / 2N 这类含点、下划线或数字的
+            # token 全部排除，术语表命中随之失效；放宽为“含字母即可”。
+            if not token.is_space and not token.is_punct and any(char.isalpha() for char in token.text)
         ],
         lemma_spans=[
             (token.idx, token.idx + len(token.text), token.lemma_.lower())
@@ -793,12 +952,15 @@ def parse_spacy(text: str) -> "ParsedSentence" | None:
     qa = parse_qa.assess(source, parsed, doc)
     strategy = "base"
     if qa["suspicious"]:
-        for candidate in ("multiroot", "conjadv", "auto"):
-            candidate_root = (
-                main_root
-                if candidate == "conjadv"
-                else _main_root(doc, prefer_first_root=True)
-            )
+        for candidate in ("multiroot", "conjadv", "inverted", "conjcl", "auto"):
+            if candidate == "inverted":
+                candidate_root = _inverted_parallel_root(doc, main_root)
+            elif candidate == "conjadv":
+                candidate_root = main_root
+            elif candidate == "conjcl":
+                candidate_root = main_root
+            else:
+                candidate_root = _main_root(doc, prefer_first_root=True)
             if candidate_root is None:
                 continue
             alt = _build_tree(doc, source, candidate_root, candidate, ClauseNode, ParsedSentence)

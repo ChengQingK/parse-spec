@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """结构翻译的语料层：短语表、用户词表与整句模板。
 
-内置语料面向英文技术规范阅读；用户可在项目根目录 `translation_corpus.json`
+内置语料面向英文技术规范阅读；用户可在 `data/translation_corpus.json`
 中扩展，结构为 {"phrases": {"英文短语": "中文"}, "words": {"英文词": "中文"}}，
 用户条目优先于内置。文件按 mtime/大小签名自动重载；损坏或非法条目按整文件
 忽略并记录日志，绝不让译文层因语料问题崩溃。
@@ -14,7 +14,7 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
@@ -72,6 +72,12 @@ BUILTIN_PHRASES: dict[str, str] = {
     "does not": "不",
     "nor does": "也不",
     "with respect to": "关于",
+    # DDR/SDR 数据率术语与其常见搭配（LPDDR 规范高频）
+    "single data rate": "单数据速率",
+    "double data rate": "双数据速率",
+    "split across": "拆分到",
+    "sent in the first phase": "在第一个相位发送",
+    "sent in the second phase": "在第二个相位发送",
 }
 
 
@@ -188,12 +194,12 @@ _default_lock = threading.Lock()
 
 
 def default_corpus() -> TranslationCorpus:
-    """项目级默认语料：读取项目根目录的可选 translation_corpus.json。"""
+    """项目级默认语料：读取 data/ 目录下的可选 translation_corpus.json。"""
     global _default_corpus
     with _default_lock:
         if _default_corpus is None:
-            root = Path(__file__).resolve().parent.parent
-            _default_corpus = TranslationCorpus(root / CORPUS_FILENAME)
+            data_dir = Path(__file__).resolve().parent.parent / "data"
+            _default_corpus = TranslationCorpus(data_dir / CORPUS_FILENAME)
         else:
             _default_corpus.refresh_if_changed()
         return _default_corpus

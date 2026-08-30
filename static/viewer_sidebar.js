@@ -27,6 +27,7 @@
     const {
       invalidateSentenceResultsFor, refreshSelectedAnalysis, loadAndRender,
       bumpRequestSerial, clearSelection, clearPreview, isNarrowViewport,
+      getSentenceFeedbackNote, submitSentenceFeedback, removeSentenceFeedback,
     } = hooks;
     const {
       analysisContent, analysisPanel, panelToggle, panelClose, panelResizer, workspace,
@@ -283,7 +284,7 @@
       if (complexWordMessage) {
         complexWordMessage.classList.remove("is-error");
         complexWordMessage.textContent = entry
-          ? (entry.source === "custom" ? "正在编辑自定义复杂词。" : "保存后会在 complex_words.json 中覆盖该内置释义。")
+          ? (entry.source === "custom" ? "正在编辑自定义复杂词。" : "保存后会在 data/complex_words.json 中覆盖该内置释义。")
           : `已从原文选中“${normalized}”，正在自动查询中文释义。`;
       }
       if (!entry && normalized) suggestComplexWordMeaning(normalized);
@@ -575,7 +576,7 @@
       }
       if (glossaryMessage) {
         glossaryMessage.classList.remove("is-error");
-        glossaryMessage.textContent = entry.source === "custom" ? "正在编辑自定义词条。" : "保存后会在 glossary.json 中覆盖该内置释义。";
+        glossaryMessage.textContent = entry.source === "custom" ? "正在编辑自定义词条。" : "保存后会在 data/glossary.json 中覆盖该内置释义。";
       }
     }
 
@@ -775,6 +776,7 @@
         result: "结果从句",
         basis: "依据要求",
         means: "方式手段",
+        conjunct: "并列分句",
         relative: "定语从句",
         content: "内容从句",
         complement: "补语从句",
@@ -1027,10 +1029,31 @@
       const refineBadge = result.refined_by
         ? `<span class="engine-badge refine-badge" title="分句树由在线模型精修，本地解析仍即时可用">在线精修 · ${esc(result.refined_by)}</span>`
         : "";
-      const qaSignals = (result.qa && Array.isArray(result.qa.signals)) ? result.qa.signals.join("；") : "";
+      const qaSignals = (result.qa && Array.isArray(result.qa.signals)) ? result.qa.signals : [];
       const qaBadge = result.qa && result.qa.suspicious
-        ? `<span class="engine-badge qa-badge" title="解析质检发现可疑信号：${esc(qaSignals)}">解析存疑</span>`
+        ? `<button class="engine-badge qa-badge qa-badge-toggle" type="button" aria-expanded="false" aria-controls="qa-detail" title="点击查看存疑信号明细">解析存疑</button>`
         : "";
+      const qaDetail = qaBadge && qaSignals.length
+        ? `<div class="qa-detail" id="qa-detail" hidden>
+        <div class="qa-detail-title">解析质检发现以下可疑信号，请结合原句复核：</div>
+        <ul>${qaSignals.map((signal) => `<li>${esc(signal)}</li>`).join("")}</ul>
+        <div class="qa-detail-note">该句的分句边界或关系标注可能不准；可切换“详细”密度查看逐分句警告，或对照原文人工确认。</div>
+      </div>`
+        : "";
+      const feedbackNote = typeof getSentenceFeedbackNote === "function" ? getSentenceFeedbackNote(target) : null;
+      const flagged = feedbackNote !== null;
+      const flagSection = `<div class="flag-section">
+      <button class="flag-toggle${flagged ? " is-flagged" : ""}" type="button" aria-expanded="false" aria-controls="sentence-flag-form" title="${flagged ? "已标注异常：点击查看或修改本句意见" : "本句读不通或解析有疑问？标注并附注意见，供批量优化解析"}">${flagged ? "标注异常 · 已标注" : "标注异常"}</button>
+      <div class="flag-form" id="sentence-flag-form" hidden>
+        <textarea id="sentence-flag-note" rows="3" maxlength="2000" placeholder="可选：说明哪里读不通、期望的正确结构是什么…">${flagged ? esc(feedbackNote) : ""}</textarea>
+        <div class="flag-actions">
+          <button class="flag-save" type="button">保存标注</button>
+          <button class="flag-delete" type="button"${flagged ? "" : " disabled"}>删除标注</button>
+          <button class="flag-cancel" type="button">取消</button>
+        </div>
+        <div class="flag-message" aria-live="polite"></div>
+      </div>
+    </div>`;
       const structureLabel = structureView === "linked" ? "原文联动树" : "嵌套原文";
       const logicSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">逻辑结构 · ${structureLabel}</h3>${structureHtml}</section>`;
       const termsSection = concise ? "" : `<section class="analysis-section"><h3 class="section-heading">复杂词</h3>${complexWordsHtml || '<div class="empty-copy">本句没有识别到较难的通用单词</div>'}<h3 class="section-heading term-heading">术语</h3>${termsHtml}</section>`;
@@ -1040,6 +1063,7 @@
       <span>${targetLocationText(target)}</span>
       <span class="meta-badges"><span class="depth-badge">${depthText(depth)}</span><span class="engine-badge">${engineName}</span>${refineBadge}${qaBadge}</span>
     </div>
+    ${qaDetail}${flagSection}
     <div class="source-card"><p class="source-text" id="panel-source-text">${esc(result.text || target.text)}</p><div class="source-context-hint">右击原文中的英文单词，可加入复杂词表</div></div>
     ${translationHtml}${conciseCore}${logicSection}
     <section class="analysis-section"><h3 class="section-heading">主句主干</h3><div class="skeleton-card">${skeleton}${skeletonExtra}</div></section>
@@ -1050,6 +1074,83 @@
       }
       for (const termButton of analysisContent.querySelectorAll(".term-open[data-glossary-word]")) {
         termButton.addEventListener("click", () => openGlossary(termButton.dataset.glossaryWord));
+      }
+
+      for (const qaToggle of analysisContent.querySelectorAll(".qa-badge-toggle")) {
+        const qaDetailElement = document.getElementById("qa-detail");
+        qaToggle.addEventListener("click", () => {
+          const expanded = qaToggle.getAttribute("aria-expanded") === "true";
+          qaToggle.setAttribute("aria-expanded", String(!expanded));
+          if (qaDetailElement) qaDetailElement.hidden = expanded;
+        });
+      }
+
+      for (const flagToggle of analysisContent.querySelectorAll(".flag-toggle")) {
+        const flagForm = document.getElementById("sentence-flag-form");
+        const noteInput = document.getElementById("sentence-flag-note");
+        const message = flagForm ? flagForm.querySelector(".flag-message") : null;
+        const setMessage = (value, isError = false) => {
+          if (!message) return;
+          message.textContent = value;
+          message.classList.toggle("is-error", isError);
+        };
+        flagToggle.addEventListener("click", () => {
+          const expanded = flagToggle.getAttribute("aria-expanded") === "true";
+          flagToggle.setAttribute("aria-expanded", String(!expanded));
+          if (flagForm) flagForm.hidden = expanded;
+          if (!expanded && noteInput && noteInput.focus) noteInput.focus();
+        });
+        const saveButton = flagForm ? flagForm.querySelector(".flag-save") : null;
+        if (saveButton && typeof submitSentenceFeedback === "function") {
+          saveButton.addEventListener("click", async () => {
+            const note = noteInput ? String(noteInput.value || "").trim() : "";
+            saveButton.disabled = true;
+            setMessage("正在保存…");
+            try {
+              await submitSentenceFeedback(target, note, {
+                qa: result.qa || null,
+                parse: (result.clauses || []).map((clause) => ({ relation: clause.relation, marker: clause.marker || "" })),
+              });
+              flagToggle.classList.add("is-flagged");
+              flagToggle.title = "已标注异常：点击查看或修改本句意见";
+              flagToggle.textContent = "标注异常 · 已标注";
+              if (deleteButton) deleteButton.disabled = false;
+              if (flagForm) flagForm.hidden = true;
+              flagToggle.setAttribute("aria-expanded", "false");
+              setMessage("已保存标注。积累的标注会存入 data/sentence_feedback.json。");
+            } catch (error) {
+              setMessage(`保存失败：${String(error)}`, true);
+            } finally {
+              saveButton.disabled = false;
+            }
+          });
+        }
+        const deleteButton = flagForm ? flagForm.querySelector(".flag-delete") : null;
+        if (deleteButton && typeof removeSentenceFeedback === "function") {
+          deleteButton.addEventListener("click", async () => {
+            deleteButton.disabled = true;
+            try {
+              await removeSentenceFeedback(target);
+              flagToggle.classList.remove("is-flagged");
+              flagToggle.title = "本句读不通或解析有疑问？标注并附注意见，供批量优化解析";
+              flagToggle.textContent = "标注异常";
+              if (noteInput) noteInput.value = "";
+              if (flagForm) flagForm.hidden = true;
+              flagToggle.setAttribute("aria-expanded", "false");
+              setMessage("已删除标注。");
+            } catch (error) {
+              setMessage(`删除失败：${String(error)}`, true);
+              deleteButton.disabled = false;
+            }
+          });
+        }
+        const cancelButton = flagForm ? flagForm.querySelector(".flag-cancel") : null;
+        if (cancelButton) {
+          cancelButton.addEventListener("click", () => {
+            if (flagForm) flagForm.hidden = true;
+            flagToggle.setAttribute("aria-expanded", "false");
+          });
+        }
       }
 
       const sourceElement = document.getElementById("panel-source-text");

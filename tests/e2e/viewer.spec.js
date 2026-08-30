@@ -49,8 +49,7 @@ test("Esc 关闭弹层并收起分析栏", async ({ page }) => {
   await expect(page.locator("#workspace")).toHaveClass(/panel-collapsed/);
 });
 
-test("目录跳转在非 100% 缩放下准确落点", async ({ page }) => {
-  await page.setInputFiles("#file", SAMPLE_PDF);
+test("目录跳转在非 100% 缩放下准确落点", async ({ page }) => {  await page.setInputFiles("#file", SAMPLE_PDF);
   await expect(page.locator("#page-status")).toHaveText("1 / 4");
 
   // 回归场景：任意非 100% 缩放（用户报告 112% 异常）。按钮步进 100% → 110%。
@@ -69,4 +68,30 @@ test("目录跳转在非 100% 缩放下准确落点", async ({ page }) => {
     return Math.abs(target.getBoundingClientRect().top - pane.getBoundingClientRect().top);
   }), { timeout: 5000 }).toBeLessThan(60);
   await expect(page.locator("#page-status")).toHaveText("3 / 4");
+});
+
+test("异常句子标注：保存、重开回显与删除", async ({ page }) => {
+  await page.setInputFiles("#file", SAMPLE_PDF);
+  await expect(page.locator("#page-status")).toHaveText("1 / 4");
+  await page.locator("#pages .page-wrap .textLayer span").first().click();
+  await expect(page.locator("#analysis-content")).toContainText("主句主干");
+
+  await page.locator(".flag-toggle").click();
+  await page.locator("#sentence-flag-note").fill("e2e：这句解析边界存疑");
+  await page.locator(".flag-save").click();
+  await expect(page.locator(".flag-message")).toContainText("已保存标注");
+  await expect(page.locator(".flag-toggle")).toHaveClass(/is-flagged/);
+
+  // 整页重载后重新打开同一文档：标注状态应从 data/sentence_feedback.json 回显
+  await page.reload();
+  await page.setInputFiles("#file", SAMPLE_PDF);
+  await expect(page.locator("#page-status")).toHaveText("1 / 4");
+  await page.locator("#pages .page-wrap .textLayer span").first().click();
+  await expect(page.locator(".flag-toggle")).toContainText("已标注");
+
+  // 清理测试残留，保持 data/ 干净
+  await page.locator(".flag-toggle").click();
+  await page.locator(".flag-delete").click();
+  await expect(page.locator(".flag-message")).toContainText("已删除标注");
+  await expect(page.locator(".flag-toggle")).not.toHaveClass(/is-flagged/);
 });

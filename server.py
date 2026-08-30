@@ -69,21 +69,52 @@ from parse.translator import lookup_word_translation, translate_sentence
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
+DATA_DIR = Path(BASE) / "data"
+
+# 历史版本把用户数据 JSON 散落在项目根目录；首次升级时统一搬入 data/ 管理。
+_USER_DATA_FILES = (
+    "bookmarks.json",
+    "glossary.json",
+    "complex_words.json",
+    "translation_corpus.json",
+    "word_cache.json",
+    "parse_cache.json",
+)
+
+
+def _migrate_user_data_files() -> None:
+    """根目录的历史用户数据 JSON 迁入 data/；新位置已存在时不覆盖。"""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return  # data/ 建不出来时保持旧路径行为，避免阻塞启动
+    for name in _USER_DATA_FILES:
+        legacy = Path(BASE) / name
+        target = DATA_DIR / name
+        if legacy.is_file() and not target.exists():
+            try:
+                legacy.replace(target)
+            except OSError:
+                pass  # 单个文件迁移失败不阻塞启动，旧文件留在根目录仍可读
+
+
+_migrate_user_data_files()
 
 app = Flask(__name__, static_folder=None)
 
-_glossary_path = Path(BASE) / "glossary.json"
+_glossary_path = DATA_DIR / "glossary.json"
 _glossary = Glossary(str(_glossary_path))  # 用户可自定义
 _glossary_signature: tuple[int, int] | None = None
 _glossary_backup_dir = Path(BASE) / "backups" / "glossary"
-_complex_words_path = Path(BASE) / "complex_words.json"
+_complex_words_path = DATA_DIR / "complex_words.json"
 _complex_words = ComplexWordTable(_complex_words_path)
 _complex_words_signature: tuple[int, int] | None = None
-_bookmarks_path = Path(BASE) / "bookmarks.json"
-_word_cache_path = Path(BASE) / "word_cache.json"
+_bookmarks_path = DATA_DIR / "bookmarks.json"
+_word_cache_path = DATA_DIR / "word_cache.json"
 _online_dict = OnlineDictionary(_word_cache_path)
-_parse_cache_path = Path(BASE) / "parse_cache.json"
+_parse_cache_path = DATA_DIR / "parse_cache.json"
 _llm_refiner = LlmRefiner(_parse_cache_path)
+_feedback_path = DATA_DIR / "sentence_feedback.json"
 MAX_SENTENCES = 32
 MAX_SENTENCE_CHARS = 10_000
 MAX_REQUEST_BYTES = 400_000
@@ -94,6 +125,10 @@ MAX_BOOKMARKS_PER_DOCUMENT = 2_000
 MAX_BOOKMARK_TEXT_CHARS = 10_000
 MAX_BOOKMARK_NAME_CHARS = 200
 MAX_GLOSSARY_BACKUPS = 30
+MAX_FEEDBACK_NOTE_CHARS = 2_000
+MAX_FEEDBACK_ITEMS = 2_000
+MAX_FEEDBACK_SIGNALS = 10
+MAX_FEEDBACK_RELATIONS = 32
 DEFAULT_PORT = 5197
 FALLBACK_PORTS = (5800, 5801, 5802, 8000, 8765)
 app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
@@ -404,7 +439,7 @@ def _normalize_bookmarks(value: object) -> list[dict]:
 
 
 def _write_bookmark_sets(bookmark_sets: dict[str, list[dict]]) -> None:
-    """原子写入项目根目录，避免中断时留下半份 JSON。"""
+    """原子写入 data/bookmarks.json，避免中断时留下半份 JSON。"""
     temporary_path = _bookmarks_path.with_suffix(_bookmarks_path.suffix + ".tmp")
     temporary_path.write_text(
         json.dumps(bookmark_sets, ensure_ascii=False, indent=2) + "\n",
@@ -521,7 +556,7 @@ def save_glossary_entry():
         _create_glossary_backup("before-edit")
         _write_user_glossary(user)
     except OSError as exc:
-        return jsonify({"error": f"无法写入 glossary.json：{exc}"}), 500
+        return jsonify({"error": f"无法写入 data/glossary.json：{exc}"}), 500
     global _glossary_signature
     _glossary_signature = None
     _refresh_glossary_if_changed()
@@ -539,13 +574,13 @@ def delete_glossary_entry():
         return jsonify({"error": "英文词条无效"}), 400
     user = _read_user_glossary()
     if word not in user:
-        return jsonify({"error": "只能删除 glossary.json 中的自定义词条"}), 404
+        return jsonify({"error": "只能删除 data/glossary.json 中的自定义词条"}), 404
     try:
         _create_glossary_backup("before-delete")
         del user[word]
         _write_user_glossary(user)
     except OSError as exc:
-        return jsonify({"error": f"无法更新 glossary.json：{exc}"}), 500
+        return jsonify({"error": f"无法更新 data/glossary.json：{exc}"}), 500
     global _glossary_signature
     _glossary_signature = None
     _refresh_glossary_if_changed()
@@ -708,7 +743,7 @@ def save_complex_word():
     try:
         _write_user_complex_words(user)
     except OSError as exc:
-        return jsonify({"error": f"无法写入 complex_words.json：{exc}"}), 500
+        return jsonify({"error": f"无法写入 data/complex_words.json：{exc}"}), 500
     global _complex_words_signature
     _complex_words_signature = None
     _refresh_complex_words_if_changed()
@@ -723,12 +758,12 @@ def delete_complex_word():
     word = str(data.get("word", "")).strip().lower()
     user = _read_user_complex_words()
     if word not in user:
-        return jsonify({"error": "只能删除 complex_words.json 中的自定义复杂词"}), 404
+        return jsonify({"error": "只能删除 data/complex_words.json 中的自定义复杂词"}), 404
     try:
         del user[word]
         _write_user_complex_words(user)
     except OSError as exc:
-        return jsonify({"error": f"无法更新 complex_words.json：{exc}"}), 500
+        return jsonify({"error": f"无法更新 data/complex_words.json：{exc}"}), 500
     global _complex_words_signature
     _complex_words_signature = None
     _refresh_complex_words_if_changed()
@@ -767,13 +802,165 @@ def save_bookmarks():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except OSError as exc:
-        return jsonify({"error": f"无法写入 bookmarks.json：{exc}"}), 500
+        return jsonify({"error": f"无法写入 data/bookmarks.json：{exc}"}), 500
     return jsonify({"bookmarks": bookmarks, "user_file": _bookmarks_path.name})
 
 
 @app.errorhandler(413)
 def request_too_large(_error):
     return jsonify({"error": f"请求体不能超过 {MAX_REQUEST_BYTES} 字节"}), 413
+
+
+# ---------------------------------------------------------------------------
+# 异常句子标注：读者在分析栏一键标记“读不通/解析可疑”的句子并附注意见，
+# 统一存入 data/sentence_feedback.json，供离线批量分析改进解析与译文。
+# ---------------------------------------------------------------------------
+
+def _read_feedback_items() -> list[dict]:
+    """读取标注列表；文件缺失或损坏时按空列表处理。"""
+    if not _feedback_path.exists():
+        return []
+    try:
+        value = json.loads(_feedback_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _write_feedback_items(items: list[dict]) -> None:
+    temporary_path = _feedback_path.with_suffix(_feedback_path.suffix + ".tmp")
+    temporary_path.write_text(
+        json.dumps(items, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(_feedback_path)
+
+
+def _feedback_item_key(document_key: str, page_num: int, sentence_index: int) -> str:
+    return f"{document_key}|{page_num}|{sentence_index}"
+
+
+def _feedback_qa_snapshot(value: object) -> dict[str, object] | None:
+    """前端回传的质检结论摘要：只保留小体积字段，控制标注文件体积。"""
+    if not isinstance(value, dict):
+        return None
+    signals_raw = value.get("signals")
+    signals = (
+        [str(item)[:200] for item in signals_raw[:MAX_FEEDBACK_SIGNALS]]
+        if isinstance(signals_raw, list)
+        else []
+    )
+    return {
+        "suspicious": bool(value.get("suspicious")),
+        "signals": signals,
+        "strategy": str(value.get("strategy", ""))[:40],
+    }
+
+
+def _feedback_parse_snapshot(value: object) -> list[dict[str, str]] | None:
+    if not isinstance(value, list):
+        return None
+    result: list[dict[str, str]] = []
+    for entry in value[:MAX_FEEDBACK_RELATIONS]:
+        if not isinstance(entry, dict):
+            continue
+        result.append({
+            "relation": str(entry.get("relation", ""))[:40],
+            "marker": str(entry.get("marker", ""))[:40],
+        })
+    return result
+
+
+@app.get("/api/sentence-feedback")
+def list_sentence_feedback():
+    """列出一份文档的异常句子标注，供前端回显“已标注”状态。"""
+    document_key = request.args.get("document_key", "").strip()
+    if not document_key or len(document_key) > MAX_BOOKMARK_DOCUMENT_KEY_CHARS:
+        return jsonify({"error": "document_key 无效"}), 400
+    items = [item for item in _read_feedback_items() if item.get("document_key") == document_key]
+    return jsonify({"feedbacks": items})
+
+
+@app.post("/api/sentence-feedback")
+def save_sentence_feedback():
+    """新增或更新一条标注（同文档同句覆盖），原句文本与质检快照一并保存。"""
+    if not request.is_json:
+        return jsonify({"error": "请求体必须使用 application/json"}), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求体必须是 JSON 对象"}), 400
+    document_key = str(data.get("document_key", "")).strip()
+    if not document_key or len(document_key) > MAX_BOOKMARK_DOCUMENT_KEY_CHARS:
+        return jsonify({"error": "document_key 无效"}), 400
+    page_num = data.get("page_num")
+    sentence_index = data.get("sentence_index")
+    if isinstance(page_num, bool) or not isinstance(page_num, int) or page_num < 1:
+        return jsonify({"error": "page_num 必须是正整数"}), 400
+    if isinstance(sentence_index, bool) or not isinstance(sentence_index, int) or sentence_index < 0:
+        return jsonify({"error": "sentence_index 必须是非负整数"}), 400
+    text = str(data.get("text", "")).strip()
+    note = str(data.get("note", "")).strip()
+    if not text:
+        return jsonify({"error": "text 不能为空"}), 400
+    if len(text) > MAX_BOOKMARK_TEXT_CHARS:
+        return jsonify({"error": f"原句文本不能超过 {MAX_BOOKMARK_TEXT_CHARS} 字符"}), 400
+    if len(note) > MAX_FEEDBACK_NOTE_CHARS:
+        return jsonify({"error": f"意见不能超过 {MAX_FEEDBACK_NOTE_CHARS} 字符"}), 400
+    now = datetime.now(timezone.utc).isoformat()
+    items = _read_feedback_items()
+    key = _feedback_item_key(document_key, page_num, sentence_index)
+    existing = next((entry for entry in items if entry.get("id") == key), None)
+    item = {
+        "id": key,
+        "document_key": document_key,
+        "page_num": page_num,
+        "sentence_index": sentence_index,
+        "text": text,
+        "note": note,
+        "qa": _feedback_qa_snapshot(data.get("qa")),
+        "parse": _feedback_parse_snapshot(data.get("parse")),
+        "created_at": existing.get("created_at", now) if existing else now,
+        "updated_at": now,
+    }
+    if existing:
+        items = [item if entry.get("id") == key else entry for entry in items]
+    else:
+        if len(items) >= MAX_FEEDBACK_ITEMS:
+            return jsonify({"error": f"标注数量已达上限 {MAX_FEEDBACK_ITEMS}，请先清理旧标注"}), 400
+        items.append(item)
+    try:
+        _write_feedback_items(items)
+    except OSError as exc:
+        return jsonify({"error": f"无法写入 sentence_feedback.json：{exc}"}), 500
+    return jsonify({"feedback": item})
+
+
+@app.delete("/api/sentence-feedback")
+def delete_sentence_feedback():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求体必须是 JSON 对象"}), 400
+    document_key = str(data.get("document_key", "")).strip()
+    page_num = data.get("page_num")
+    sentence_index = data.get("sentence_index")
+    if not document_key or len(document_key) > MAX_BOOKMARK_DOCUMENT_KEY_CHARS:
+        return jsonify({"error": "document_key 无效"}), 400
+    if isinstance(page_num, bool) or not isinstance(page_num, int) or page_num < 1:
+        return jsonify({"error": "page_num 必须是正整数"}), 400
+    if isinstance(sentence_index, bool) or not isinstance(sentence_index, int) or sentence_index < 0:
+        return jsonify({"error": "sentence_index 必须是非负整数"}), 400
+    key = _feedback_item_key(document_key, page_num, sentence_index)
+    items = _read_feedback_items()
+    remaining = [entry for entry in items if entry.get("id") != key]
+    if len(remaining) == len(items):
+        return jsonify({"error": "标注不存在"}), 404
+    try:
+        _write_feedback_items(remaining)
+    except OSError as exc:
+        return jsonify({"error": f"无法更新 sentence_feedback.json：{exc}"}), 500
+    return jsonify({"deleted": key})
 
 
 @app.after_request
@@ -798,8 +985,29 @@ if __name__ == "__main__":
         name="parse-warmup",
         daemon=True,
     ).start()  # 后台加载解析模型，避免首次点击承担 trf 模型加载耗时
+
+    def _open_browser_when_ready() -> None:
+        # start.bat 一键启动时打开浏览器；服务在独立线程里再等端口真正可用
+        import socket
+        import time
+        import webbrowser
+
+        url = f"http://127.0.0.1:{selected_port}"
+        for _ in range(40):
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                probe.settimeout(0.25)
+                if probe.connect_ex(("127.0.0.1", selected_port)) == 0:
+                    webbrowser.open(url)
+                    return
+            finally:
+                probe.close()
+            time.sleep(0.25)
+
+    if os.environ.get("PARSE_SPEC_OPEN_BROWSER", "").strip() == "1":
+        threading.Thread(target=_open_browser_when_ready, name="open-browser", daemon=True).start()
     if selected_port != DEFAULT_PORT:
         print(f"* 默认端口 {DEFAULT_PORT} 不可用，已自动切换到 {selected_port}")
     print(f"* 解析模型 {active_model}（可用 PARSE_SPEC_SPACY_MODEL 覆盖）")
-    print(f"* 访问 http://127.0.0.1:{selected_port}  (本地仅离线使用)")
+    print(f"* 访问 http://127.0.0.1:{selected_port}  (服务只监听本机回环地址)")
     app.run(host="127.0.0.1", port=selected_port, debug=False)

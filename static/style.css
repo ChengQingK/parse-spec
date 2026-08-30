@@ -562,9 +562,9 @@ body.is-resizing-y .document-pane { pointer-events:none; }
   letter-spacing: -.3px;
 }
 
+/* 解析密度与结构展示并排一行；面板拖到极窄时允许折行兜底 */
 .analysis-toolbar {
   display: grid;
-  gap: 8px;
   padding: 10px 12px 11px;
   border-bottom: 1px solid var(--line);
   background: var(--soft);
@@ -573,6 +573,7 @@ body.is-resizing-y .document-pane { pointer-events:none; }
 .toolbar-setting {
   min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -606,6 +607,7 @@ body.is-resizing-y .document-pane { pointer-events:none; }
   font: inherit;
   font-size: var(--fs-2xs);
   font-weight: 700;
+  white-space: nowrap;
   cursor: pointer;
   transition: background .14s ease, color .14s ease, box-shadow .14s ease;
 }
@@ -700,10 +702,117 @@ body.is-resizing-y .document-pane { pointer-events:none; }
   color: var(--condition);
 }
 
-/* 解析存疑徽标：警示色，提示该句质检未通过需人工复核 */
+/* 解析存疑徽标：警示色，提示该句质检未通过需人工复核；点击展开信号明细 */
 .engine-badge.qa-badge {
   background: var(--warning);
   color: var(--warning-ink);
+}
+
+button.engine-badge.qa-badge {
+  border: 0;
+  font: inherit;
+  font-size: var(--fs-2xs);
+  cursor: pointer;
+}
+
+/* 解析存疑详情：默认折叠，点击徽章展开，逐条列出质检发现的信号 */
+.qa-detail {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning-ink) 35%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--warning) 55%, var(--panel));
+  font-size: var(--fs-2xs);
+  line-height: 1.6;
+}
+
+.qa-detail-title {
+  font-weight: 700;
+  color: var(--warning-ink);
+}
+
+.qa-detail ul {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.qa-detail-note {
+  color: var(--muted);
+}
+
+/* 异常句子标注：一键标记“读不通/解析可疑”并附注意见，存入 data/sentence_feedback.json */
+.flag-section {
+  margin: 0 0 10px;
+}
+
+.flag-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-full);
+  background: var(--panel);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+
+.flag-toggle:hover {
+  color: var(--ink);
+  background: var(--muted-bg);
+}
+
+.flag-toggle.is-flagged {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.flag-form {
+  margin-top: 8px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--soft);
+}
+
+.flag-form[hidden] {
+  display: none;
+}
+
+.flag-form textarea {
+  width: 100%;
+  min-height: 56px;
+  padding: 8px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-xs);
+}
+
+.flag-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.flag-message {
+  min-height: 1em;
+  color: var(--muted);
+  font-size: var(--fs-2xs);
+}
+
+.flag-message.is-error {
+  color: var(--danger);
 }
 
 .depth-badge {

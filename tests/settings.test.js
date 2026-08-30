@@ -345,8 +345,25 @@ test('解析存疑徽标随 qa 结果展示并携带信号提示', () => {
   result.qa = { suspicious: true, signals: ['连接副词 “however” 在句中但没有对应的分句边界'], strategy: 'base' };
   context.renderAnalysisPanel(target, result);
   assert.match(els['analysis-content'].innerHTML, /解析存疑/);
-  assert.match(els['analysis-content'].innerHTML, /qa-badge/);
+  assert.match(els['analysis-content'].innerHTML, /qa-badge qa-badge-toggle/);
+  assert.match(els['analysis-content'].innerHTML, /aria-expanded="false"/);
+  assert.match(els['analysis-content'].innerHTML, /qa-detail[^>]*hidden/);
+  assert.match(els['analysis-content'].innerHTML, /解析质检发现以下可疑信号/);
   assert.match(els['analysis-content'].innerHTML, /however/);
+});
+
+test('异常句子标注按钮与意见表单随分析面板渲染', () => {
+  const { context, els } = loadViewer();
+  const target = { key: '1:0', pageNum: 1, sentenceIndex: 0, text: 'The data is sampled when ready.', spans: [] };
+  const result = resultFor(target.text);
+
+  context.renderAnalysisPanel(target, result);
+  assert.match(els['analysis-content'].innerHTML, /标注异常/);
+  assert.match(els['analysis-content'].innerHTML, /flag-form[^>]*hidden/);
+  assert.match(els['analysis-content'].innerHTML, /sentence-flag-note/);
+  assert.match(els['analysis-content'].innerHTML, /flag-save/);
+  assert.match(els['analysis-content'].innerHTML, /<button class="flag-delete"[^>]*disabled>/);
+  assert.doesNotMatch(els['analysis-content'].innerHTML, /已标注/);
 });
 
 test('目录与固定右侧分析栏保持独立', () => {

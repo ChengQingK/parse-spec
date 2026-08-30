@@ -96,8 +96,6 @@
           <button id="depth-standard" type="button" data-analysis-depth="standard" aria-pressed="true">标准</button>
           <button id="depth-detailed" type="button" data-analysis-depth="detailed" aria-pressed="false">详细</button>
         </div>
-      </div>
-      <div class="toolbar-setting">
         <span class="toolbar-label">结构</span>
         <div class="segmented-control" role="group" aria-label="逻辑结构展示">
           <button id="structure-bracket" type="button" data-structure-view="bracket" aria-pressed="true">嵌套原文</button>
@@ -160,7 +158,7 @@
         <p id="glossary-message" class="glossary-message" aria-live="polite">保存后会立即参与术语识别与本地翻译。</p>
         <div class="glossary-form-actions">
           <button id="glossary-delete" class="secondary-action danger-action" type="button" disabled>删除自定义词条</button>
-          <button class="btn" type="submit">保存到 glossary.json</button>
+          <button class="btn" type="submit">保存到 data/glossary.json</button>
         </div>
       </form>
     </div>
@@ -189,7 +187,7 @@
         <p id="complex-word-message" class="glossary-message" aria-live="polite">在句子分析原文中右击单词，会自动查询释义并显示词典详情。</p>
         <div class="glossary-form-actions">
           <button id="complex-word-delete" class="secondary-action danger-action" type="button" disabled>删除自定义复杂词</button>
-          <button class="btn" type="submit">保存到 complex_words.json</button>
+          <button class="btn" type="submit">保存到 data/complex_words.json</button>
         </div>
       </form>
     </div>

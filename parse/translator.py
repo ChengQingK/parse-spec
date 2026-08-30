@@ -29,6 +29,10 @@ _WORDS = {
     "shall": "必须", "must": "必须", "may": "可以", "might": "可能", "should": "应当",
     "can": "能够", "could": "能够", "will": "将", "would": "将", "not": "不", "never": "绝不",
     "also": "也", "only": "仅", "then": "然后", "therefore": "因此", "however": "但是",
+    # 缩写整体保留为一个 token 后在此翻译；i.e. = that is（即），e.g. = for example（例如）
+    "i.e.": "即", "e.g.": "例如", "etc": "等等", "etc.": "等等",
+    "lower": "低", "upper": "高", "sent": "发送", "send": "发送", "sends": "发送",
+    "single": "单个", "rate": "速率", "width": "宽度", "bus": "总线", "phase": "相位",
     "required": "要求", "require": "要求", "requires": "要求", "ignored": "忽略", "ignore": "忽略",
     "updated": "更新", "update": "更新", "performed": "执行", "perform": "执行", "supported": "支持",
     "support": "支持", "enabled": "启用", "enable": "启用", "disabled": "禁用", "disable": "禁用",
@@ -52,9 +56,20 @@ _WORDS = {
     "used": "使用", "use": "使用", "defined": "定义", "define": "定义", "specified": "规定",
     "allows": "允许", "allow": "允许", "prevents": "防止", "prevent": "防止", "contains": "包含",
     "consists": "由……组成", "means": "表示", "indicates": "表示", "indicate": "表示",
+    # 系动词补“是”：等式句（X is Y）逐词直译缺系动词会读不通
+    "is": "是", "are": "是", "was": "是", "were": "是",
 }
 
-_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_'-]*(?:\[[^\]]+\])?|\d+(?:\.\d+)?|[^\w\s]", re.UNICODE)
+# token 顺序敏感：带点缩写与“数字+字母”复合词必须先于通用词形匹配，
+# 否则 i.e. 被切碎成 i/./e/. 且 2N 被拆成 2/N（间距与术语识别都会出错）。
+_TOKEN = re.compile(
+    r"[A-Za-z]\.(?:[A-Za-z]\.)+"                      # i.e. / e.g.
+    r"|[A-Za-z][A-Za-z0-9_'-]*(?:\[[^\]]+\])?"
+    r"|\d+(?:\.\d+)?[A-Za-z]*"                        # 2N / 7bit / 011b
+    r"|[^\w\s]",
+    re.UNICODE,
+)
+_POSSESSIVE = re.compile(r"([A-Za-z][A-Za-z0-9_]*)(?:['’]s)")
 _TECHNICAL = re.compile(r"(?:[A-Z]{2,}[A-Za-z0-9_]*|[A-Za-z]+\d+[A-Za-z0-9_]*|[a-z]+_[A-Za-z0-9_]+|t[A-Z][A-Za-z0-9_]*)$")
 
 
@@ -75,7 +90,11 @@ def _lemma_candidates(word: str) -> list[str]:
 def _translate_word(token: str, glossary: Any, corpus: TranslationCorpus | None = None) -> str:
     if _TECHNICAL.fullmatch(token):
         return token
-    if token.isdigit() or re.fullmatch(r"\d+(?:\.\d+)?", token):
+    possessive = _POSSESSIVE.fullmatch(token)
+    if possessive:
+        # “DRAM's” → “DRAM 的”：所有格拆出基词翻译，技术名保持原文
+        return f"{_translate_word(possessive.group(1), glossary, corpus)} 的"
+    if token.isdigit() or re.fullmatch(r"\d+(?:\.\d+)?[A-Za-z]*", token):
         return token
     entry = glossary.lookup(token) if glossary is not None else None
     if entry and entry.get("zh"):

@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -73,6 +74,25 @@ class ParseQaTests(unittest.TestCase):
         parsed = self._single_clause("The value is latched, however the clock keeps running.")
         qa = parse_qa.assess(parsed.text, parsed)
         self.assertTrue(qa["suspicious"])
+
+    def test_parenthetical_adverb_between_commas_is_not_flagged(self):
+        # “If, however, X” 的 however 是句中评注（前后都是逗号），不是分句边界
+        parsed = self._single_clause("If, however, the ODT_CA bond pad is HIGH, the die will terminate the CA bus.")
+        qa = parse_qa.assess(parsed.text, parsed)
+        self.assertFalse(qa["suspicious"])
+
+    def test_therefore_after_semicolon_is_flagged(self):
+        # 分号后的 therefore 是真边界（其后逗号是句副词常规标点，不能按插入语跳过）
+        parsed = self._single_clause("the CA bus phases are concatenated; therefore, the dfi_address bus width is 7 bits.")
+        qa = parse_qa.assess(parsed.text, parsed)
+        self.assertTrue(qa["suspicious"])
+
+    def test_semicolon_signal_requires_finite_verbs_on_both_sides(self):
+        # 分号后是无动词省略片段（术语表条目式文本），不应判漏拆
+        parsed = self._single_clause("LPDDR4 device has one DMI signal pin per byte; total of 2 DMI signals per channel.")
+        doc = spacy_parser._NLP(parsed.text)
+        qa = parse_qa.assess(parsed.text, parsed, doc)
+        self.assertFalse(qa["suspicious"])
 
     def test_weak_signals_alone_do_not_trigger_suspicious(self):
         parsed = self._single_clause("The register stays valid.")
@@ -150,6 +170,66 @@ class CorpusRegressionTests(unittest.TestCase):
                 failures.append(f"{entry['id']}: {'；'.join(diffs)}")
         self.assertGreater(checked, 0)
         self.assertEqual(failures, [])
+
+
+class SinceSuchThatRelationTests(unittest.TestCase):
+    """DFI LPDDR5 句回归：句首/逗号前 since 判原因，“such that” 判结果。"""
+
+    DFI_CA_SENTENCE = (
+        "Since the dfi_address is a single phase signal for LPDDR5, the CA bus phases "
+        "are concatenated such that the rising edge CA is on the lower 7 bits and the "
+        "falling edge CA is on the upper 7 bits."
+    )
+
+    def test_since_and_such_that_clause_relations(self):
+        parsed = parse_sentence(self.DFI_CA_SENTENCE)
+        self.assertEqual(
+            [clause.relation for clause in parsed.clauses],
+            ["main", "cause", "result"],
+        )
+        _main, since_clause, result_clause = parsed.clauses
+        self.assertEqual(since_clause.marker.lower(), "since")
+        self.assertEqual(result_clause.marker.lower(), "such that")
+        self.assertFalse(parsed.qa["suspicious"])
+
+    def test_mid_sentence_since_without_comma_stays_ambiguous(self):
+        parsed = parse_sentence("The status bit remains set since the transfer started.")
+        since_clause = next(clause for clause in parsed.clauses if clause.marker.lower() == "since")
+        self.assertEqual(since_clause.relation, "ambiguous")
+
+
+class SemicolonParallelTests(unittest.TestCase):
+    """分号 + 连接副词倒挂修复：分号前分句应为主句，连接副词段为其子分句。"""
+
+    DFI_SDR_SENTENCE = (
+        "In 2N mode, it is SDR (single data rate) split across 2 memory cycles "
+        "(i.e. 2 DFI phases), with the DRAM's lower 7 bits sent in the first phase "
+        "and the upper 7 bits sent in the second phase; therefore, the dfi_address "
+        "bus width is 7 bits."
+    )
+
+    def test_semicolon_therefore_clause_splits_under_trf(self):
+        import spacy
+
+        if importlib.util.find_spec("en_core_web_trf") is None:
+            self.skipTest("需要可选的 en_core_web_trf 模型")
+        trf = spacy.load("en_core_web_trf")
+        with patch.object(spacy_parser, "_NLP", trf), patch.object(spacy_parser, "_SPACY_OK", True):
+            parsed = spacy_parser.parse_spacy(self.DFI_SDR_SENTENCE)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(
+            [clause.relation for clause in parsed.clauses],
+            ["main", "relative", "relative", "relative", "result"],
+        )
+        self.assertFalse(parsed.qa["suspicious"])
+        self.assertEqual(parsed.qa["strategy"], "inverted")
+        main, result = parsed.clauses[0], parsed.clauses[4]
+        self.assertEqual(result.marker.lower(), "therefore")
+        self.assertEqual(result.parent_id, main.id)
+        self.assertTrue(main.text.startswith("In 2N mode"))
+        self.assertNotIn(";", main.text)  # 分号前段独立成主句
+        self.assertNotIn("SDR", result.text)  # 结果从句不再嵌套主句文本
+        self.assertTrue(result.text.startswith("therefore"))
 
 
 class _NullOnlineDict:
@@ -392,6 +472,38 @@ class GlossaryTests(unittest.TestCase):
         self.assertIn("发生 interfere", translated)
         self.assertIn("DRAM 接口上的信号", translated)
         self.assertIn("DFI 总线处于空闲状态", translated)
+
+
+class TranslationReadabilityTests(unittest.TestCase):
+    """结构辅助译文可读性回归：缩写整体、所有格、分词定语与系动词。"""
+
+    def test_dotted_abbreviations_translate_as_whole_token(self):
+        translated = translate_text("The SDR mode (i.e. 2 DFI phases) is used.", Glossary())
+        # 修复前 i.e. 被切碎成 i/./e/.，句点换成中文句号且术语表无法命中
+        self.assertNotIn("i。e。", translated)
+        self.assertIn("即", translated)
+        self.assertIn("2 DFI 相位", translated)
+
+    def test_technical_tokens_and_possessive_stay_readable(self):
+        translated = translate_text(
+            "In 2N mode, the DRAM's lower 7 bits and the upper 7 bits reach the dfi_address bus width.",
+            Glossary(),
+        )
+        self.assertIn("2N", translated)  # 数字+字母复合词不再拆成 2 N
+        self.assertIn("DRAM 的", translated)
+        self.assertNotIn("DRAM's", translated)
+        self.assertIn("dfi_address", translated)  # 信号名保留原文
+        self.assertIn("总线宽度", translated)
+        self.assertIn("低 7 位", translated)
+        self.assertIn("高 7 位", translated)
+
+    def test_participle_phrase_sent_in_nth_phase(self):
+        translated = translate_text("The upper 7 bits sent in the second phase are latched.", Glossary())
+        self.assertIn("在第二个相位发送", translated)
+
+    def test_copula_is_rendered_for_equative_clauses(self):
+        translated = translate_text("the dfi_address bus width is 7 bits", Glossary())
+        self.assertIn("总线宽度是 7 位", translated)
 
 
 class ApiTests(unittest.TestCase):
@@ -802,6 +914,83 @@ class TranslationCorpusTests(unittest.TestCase):
             self.assertTrue(corpus.refresh_if_changed())
             self.assertEqual(corpus.words.get("quiesce"), "停顿")
             self.assertFalse(corpus.refresh_if_changed())
+
+
+class SentenceFeedbackApiTests(unittest.TestCase):
+    """异常句子标注 API：同句覆盖保存、按文档列表、删除与输入校验。"""
+
+    def setUp(self):
+        server.app.config.update(TESTING=True)
+        self.client = server.app.test_client()
+        self._original_path = server._feedback_path
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        server._feedback_path = Path(directory.name) / "sentence_feedback.json"
+        self.addCleanup(setattr, server, "_feedback_path", self._original_path)
+
+    def _payload(self, **overrides):
+        payload = {
+            "document_key": "spec.pdf:123",
+            "page_num": 2,
+            "sentence_index": 5,
+            "text": "The dfi_address bus width is 7 bits.",
+            "note": "主干读不通，期望是……",
+            "qa": {"suspicious": True, "signals": ["连接副词 therefore 无边界"], "strategy": "base"},
+            "parse": [{"relation": "main", "marker": ""}, {"relation": "result", "marker": "therefore"}],
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_save_upserts_and_persists(self):
+        first = self.client.post("/api/sentence-feedback", json=self._payload())
+        self.assertEqual(first.status_code, 200)
+        body = first.get_json()
+        self.assertEqual(body["feedback"]["note"], "主干读不通，期望是……")
+        self.assertEqual(body["feedback"]["qa"]["strategy"], "base")
+        self.assertEqual(body["feedback"]["parse"][1]["marker"], "therefore")
+
+        second = self.client.post("/api/sentence-feedback", json=self._payload(note="第二条意见"))
+        self.assertEqual(second.status_code, 200)
+        stored = json.loads(server._feedback_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(stored), 1)  # 同文档同句覆盖，不重复追加
+        self.assertEqual(stored[0]["note"], "第二条意见")
+        self.assertEqual(stored[0]["created_at"], body["feedback"]["created_at"])
+
+    def test_list_filters_by_document_key(self):
+        self.client.post("/api/sentence-feedback", json=self._payload())
+        self.client.post(
+            "/api/sentence-feedback", json=self._payload(document_key="other.pdf:1", sentence_index=0)
+        )
+        listing = self.client.get("/api/sentence-feedback?document_key=spec.pdf:123")
+        self.assertEqual(listing.status_code, 200)
+        feedbacks = listing.get_json()["feedbacks"]
+        self.assertEqual(len(feedbacks), 1)
+        self.assertEqual(feedbacks[0]["document_key"], "spec.pdf:123")
+
+    def test_delete_removes_and_reports_missing(self):
+        self.client.post("/api/sentence-feedback", json=self._payload())
+        deleted = self.client.delete("/api/sentence-feedback", json=self._payload())
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(json.loads(server._feedback_path.read_text(encoding="utf-8")), [])
+        missing = self.client.delete("/api/sentence-feedback", json=self._payload())
+        self.assertEqual(missing.status_code, 404)
+
+    def test_invalid_inputs_are_rejected(self):
+        cases = [
+            self._payload(text=""),
+            self._payload(page_num=0),
+            self._payload(sentence_index=-1),
+            self._payload(note="x" * 2001),
+            self._payload(document_key=""),
+        ]
+        for payload in cases:
+            response = self.client.post("/api/sentence-feedback", json=payload)
+            self.assertEqual(response.status_code, 400)
+
+    def test_empty_note_is_allowed(self):
+        response = self.client.post("/api/sentence-feedback", json=self._payload(note=""))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["feedback"]["note"], "")
 
 
 class ParseIsolationTests(unittest.TestCase):
@@ -1216,32 +1405,39 @@ class OnlineDictionaryTests(unittest.TestCase):
         self.assertIsNone(online_dict._normalize_youdao({"input": "zzz", "lang": "en"}, "zzz"))  # 未收录
         self.assertIsNone(online_dict._normalize_youdao(None, "zzz"))
 
-    def test_fetch_tries_sources_in_order_until_hit(self):
+    def test_fetch_queries_all_sources_concurrently_until_hit(self):
         calls = []
+        calls_lock = threading.Lock()
 
         def youdao_miss(word):
-            calls.append(("youdao", word))
+            with calls_lock:
+                calls.append(("youdao", word))
             return "not_found", None
 
         def freeapi_hit(word):
-            calls.append(("freeapi", word))
+            with calls_lock:
+                calls.append(("freeapi", word))
             return "hit", {"word": word, "phonetic": "/x/", "pos_entries": [{"pos": "noun", "definitions": ["ok"], "examples": [], "synonyms": []}], "collocations": [], "source": "dictionaryapi.dev"}
 
         with tempfile.TemporaryDirectory() as directory:
             dictionary = online_dict.OnlineDictionary(Path(directory) / "cache.json", sources=("youdao", "freeapi"))
             with patch.dict(online_dict.PROVIDERS, {"youdao": youdao_miss, "freeapi": freeapi_hit}):
                 self.assertIsNotNone(dictionary.lookup("party"))
-        self.assertEqual(calls, [("youdao", "party"), ("freeapi", "party")])
+        # 多源并发竞速：两个源都被查询（先后不保证），任一命中即返回。
+        self.assertEqual(sorted(calls), [("freeapi", "party"), ("youdao", "party")])
 
     def test_fetch_breaker_skips_recently_failed_source(self):
         calls = []
+        calls_lock = threading.Lock()
 
         def youdao_error(word):
-            calls.append(("youdao", word))
+            with calls_lock:
+                calls.append(("youdao", word))
             return "error", None
 
         def freeapi_hit(word):
-            calls.append(("freeapi", word))
+            with calls_lock:
+                calls.append(("freeapi", word))
             return "hit", {"word": word, "phonetic": "/x/", "pos_entries": [{"pos": "noun", "definitions": ["ok"], "examples": [], "synonyms": []}], "collocations": [], "source": "dictionaryapi.dev"}
 
         with tempfile.TemporaryDirectory() as directory:
@@ -1249,10 +1445,8 @@ class OnlineDictionaryTests(unittest.TestCase):
             with patch.dict(online_dict.PROVIDERS, {"youdao": youdao_error, "freeapi": freeapi_hit}):
                 self.assertIsNotNone(dictionary.lookup("party"))       # 首次：youdao 失败并熔断，freeapi 兜底
                 self.assertIsNotNone(dictionary.lookup("evaluation"))  # 熔断期内 youdao 被跳过
-        self.assertEqual(
-            calls,
-            [("youdao", "party"), ("freeapi", "party"), ("freeapi", "evaluation")],
-        )
+        self.assertEqual(sorted(calls[:2]), [("freeapi", "party"), ("youdao", "party")])
+        self.assertEqual(calls[2], ("freeapi", "evaluation"))
 
     def test_fetch_reports_error_when_all_sources_fail(self):
         with tempfile.TemporaryDirectory() as directory:
