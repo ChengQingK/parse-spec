@@ -875,11 +875,13 @@ def _feedback_parse_snapshot(value: object) -> list[dict[str, str]] | None:
 
 @app.get("/api/sentence-feedback")
 def list_sentence_feedback():
-    """列出一份文档的异常句子标注，供前端回显“已标注”状态。"""
+    """列出异常句子标注：带 document_key 时按文档过滤，缺省返回全部（管理界面用）。"""
     document_key = request.args.get("document_key", "").strip()
-    if not document_key or len(document_key) > MAX_BOOKMARK_DOCUMENT_KEY_CHARS:
+    if len(document_key) > MAX_BOOKMARK_DOCUMENT_KEY_CHARS:
         return jsonify({"error": "document_key 无效"}), 400
-    items = [item for item in _read_feedback_items() if item.get("document_key") == document_key]
+    items = _read_feedback_items()
+    if document_key:
+        items = [item for item in items if item.get("document_key") == document_key]
     return jsonify({"feedbacks": items})
 
 

@@ -362,7 +362,7 @@ test('异常句子标注按钮与意见表单随分析面板渲染', () => {
   assert.match(els['analysis-content'].innerHTML, /flag-form[^>]*hidden/);
   assert.match(els['analysis-content'].innerHTML, /sentence-flag-note/);
   assert.match(els['analysis-content'].innerHTML, /flag-save/);
-  assert.match(els['analysis-content'].innerHTML, /<button class="flag-delete"[^>]*disabled>/);
+  assert.match(els['analysis-content'].innerHTML, /flag-delete[^>]*disabled/);
   assert.doesNotMatch(els['analysis-content'].innerHTML, /已标注/);
 });
 

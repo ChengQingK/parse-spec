@@ -101,6 +101,28 @@ const glossaryZh = document.getElementById("glossary-zh");
 const glossaryNote = document.getElementById("glossary-note");
 const glossaryMessage = document.getElementById("glossary-message");
 const glossaryBackupSelect = document.getElementById("glossary-backup-select");
+const feedbackToggle = document.getElementById("feedback-toggle");
+const feedbackDialog = document.getElementById("feedback-dialog");
+const feedbackClose = document.getElementById("feedback-close");
+const feedbackSearch = document.getElementById("feedback-search");
+const feedbackList = document.getElementById("feedback-list");
+const feedbackForm = document.getElementById("feedback-form");
+const feedbackContext = document.getElementById("feedback-context");
+const feedbackMeta = document.getElementById("feedback-meta");
+const feedbackNote = document.getElementById("feedback-note");
+const feedbackMessage = document.getElementById("feedback-message");
+const feedbackSave = document.getElementById("feedback-save");
+const feedbackDelete = document.getElementById("feedback-delete");
+const feedbackLocate = document.getElementById("feedback-locate");
+const searchToggle = document.getElementById("search-toggle");
+const searchPanel = document.getElementById("search-panel");
+const searchInput = document.getElementById("search-input");
+const searchCount = document.getElementById("search-count");
+const searchPrev = document.getElementById("search-prev");
+const searchNext = document.getElementById("search-next");
+const searchClose = document.getElementById("search-close");
+const pageJumpForm = document.getElementById("page-jump-form");
+const pageJump = document.getElementById("page-jump");
 const glossaryBackupCreate = document.getElementById("glossary-backup-create");
 const glossaryBackupRestore = document.getElementById("glossary-backup-restore");
 const glossaryBackupDownload = document.getElementById("glossary-backup-download");
@@ -293,6 +315,265 @@ async function removeSentenceFeedback(target) {
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   const key = sentenceFeedbackKey(currentDocumentKey, target);
   sentenceFeedbackItems = sentenceFeedbackItems.filter((entry) => entry.id !== key);
+}
+
+/* 标注管理弹窗：跨文档列出全部标注，支持编辑意见、删除与当前文档内定位。 */
+let feedbackEntries = [];
+let feedbackSelected = null;
+
+function feedbackDocumentLabel(key) {
+  return String(key || "").split(":")[0] || "(未命名)";
+}
+
+async function openFeedbackDialog() {
+  if (!feedbackDialog) return;
+  if (complexWordDialog && !complexWordDialog.hidden) closeComplexWords();
+  if (glossaryDialog && !glossaryDialog.hidden) closeGlossary();
+  feedbackDialog.hidden = false;
+  if (feedbackToggle) feedbackToggle.setAttribute("aria-expanded", "true");
+  if (feedbackMessage) {
+    feedbackMessage.classList.remove("is-error");
+    feedbackMessage.textContent = "标注会记录原句与解析快照，供批量改进解析与译文。";
+  }
+  feedbackSelected = null;
+  if (feedbackContext) feedbackContext.textContent = "选择左侧标注进行编辑";
+  if (feedbackMeta) feedbackMeta.textContent = "";
+  if (feedbackNote) feedbackNote.value = "";
+  if (feedbackDelete) feedbackDelete.disabled = true;
+  if (feedbackLocate) feedbackLocate.disabled = true;
+  try {
+    const response = await fetch("/api/sentence-feedback");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    feedbackEntries = Array.isArray(data.feedbacks) ? data.feedbacks : [];
+  } catch (error) {
+    feedbackEntries = [];
+    if (feedbackMessage) {
+      feedbackMessage.classList.add("is-error");
+      feedbackMessage.textContent = `标注列表读取失败：${String(error)}`;
+    }
+  }
+  renderFeedbackEntries(feedbackSearch ? feedbackSearch.value : "");
+}
+
+function closeFeedbackDialog() {
+  if (!feedbackDialog) return;
+  feedbackDialog.hidden = true;
+  if (feedbackToggle) feedbackToggle.setAttribute("aria-expanded", "false");
+}
+
+function renderFeedbackEntries(query = "") {
+  if (!feedbackList) return;
+  const needle = String(query || "").trim().toLowerCase();
+  const visible = feedbackEntries.filter((item) => !needle
+    || String(item.text || "").toLowerCase().includes(needle)
+    || String(item.note || "").toLowerCase().includes(needle)
+    || String(item.document_key || "").toLowerCase().includes(needle));
+  if (!visible.length) {
+    feedbackList.innerHTML = '<div class="outline-empty">还没有标注。在分析栏点击“标注异常”即可添加。</div>';
+    return;
+  }
+  feedbackList.innerHTML = visible.map((item) => {
+    const text = String(item.text || "");
+    const note = String(item.note || "");
+    const suspicious = item.qa && item.qa.suspicious ? " · 解析存疑" : "";
+    return `<button class="glossary-entry" type="button" data-feedback-id="${esc(item.id)}">
+      <span><strong>${esc(feedbackDocumentLabel(item.document_key))}</strong><span class="glossary-source">第 ${esc(item.page_num)} 页 · 句 ${Number(item.sentence_index) + 1}${suspicious}</span><br><small>${esc(text.slice(0, 64))}${text.length > 64 ? "…" : ""}</small></span>
+      <span>${esc(note.slice(0, 48))}${note.length > 48 ? "…" : ""}</span>
+    </button>`;
+  }).join("");
+}
+
+function selectFeedbackEntry(id) {
+  const item = feedbackEntries.find((entry) => entry.id === id);
+  if (!item) return;
+  feedbackSelected = item;
+  if (feedbackContext) feedbackContext.textContent = `${feedbackDocumentLabel(item.document_key)} · 第 ${item.page_num} 页 · 句 ${Number(item.sentence_index) + 1}`;
+  if (feedbackMeta) feedbackMeta.textContent = String(item.text || "");
+  if (feedbackNote) feedbackNote.value = String(item.note || "");
+  if (feedbackDelete) feedbackDelete.disabled = false;
+  if (feedbackLocate) feedbackLocate.disabled = item.document_key !== currentDocumentKey;
+  if (feedbackMessage) {
+    feedbackMessage.classList.remove("is-error");
+    feedbackMessage.textContent = "可修改意见后保存，或删除该标注。";
+  }
+}
+
+function syncFlagButtonForItem(item) {
+  // 管理弹窗改动后，若当前分析面板正展示同一句，同步其“已标注”按钮状态
+  if (!selectedTarget || !analysisContent) return;
+  const key = sentenceFeedbackKey(currentDocumentKey, selectedTarget);
+  if (!item || item.id !== key) return;
+  const toggle = analysisContent.querySelector(".flag-toggle");
+  if (!toggle) return;
+  const note = String(item.note || "");
+  toggle.classList.add("is-flagged");
+  toggle.textContent = "标注异常 · 已标注";
+  toggle.title = note ? `已标注异常：${note}` : "已标注异常：点击查看或修改本句意见";
+}
+
+function syncFlagButtonRemoved(id) {
+  if (!selectedTarget || !analysisContent) return;
+  if (id !== sentenceFeedbackKey(currentDocumentKey, selectedTarget)) return;
+  const toggle = analysisContent.querySelector(".flag-toggle");
+  if (!toggle) return;
+  toggle.classList.remove("is-flagged");
+  toggle.textContent = "标注异常";
+  toggle.title = "本句读不通或解析有疑问？标注并附注意见，供批量优化解析";
+}
+
+async function saveSelectedFeedback(event) {
+  if (event && event.preventDefault) event.preventDefault();
+  if (!feedbackSelected) return;
+  const note = feedbackNote ? feedbackNote.value.trim() : "";
+  try {
+    const response = await fetch("/api/sentence-feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        document_key: feedbackSelected.document_key,
+        page_num: feedbackSelected.page_num,
+        sentence_index: feedbackSelected.sentence_index,
+        text: feedbackSelected.text,
+        note,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    feedbackSelected = data.feedback;
+    const index = feedbackEntries.findIndex((entry) => entry.id === data.feedback.id);
+    if (index >= 0) feedbackEntries[index] = data.feedback;
+    else feedbackEntries.push(data.feedback);
+    renderFeedbackEntries(feedbackSearch ? feedbackSearch.value : "");
+    if (feedbackMessage) {
+      feedbackMessage.classList.remove("is-error");
+      feedbackMessage.textContent = "意见已保存。";
+    }
+    const cachedItem = sentenceFeedbackItems.find((entry) => entry.id === data.feedback.id);
+    if (cachedItem) sentenceFeedbackItems[sentenceFeedbackItems.indexOf(cachedItem)] = data.feedback;
+    syncFlagButtonForItem(data.feedback);
+  } catch (error) {
+    if (feedbackMessage) {
+      feedbackMessage.classList.add("is-error");
+      feedbackMessage.textContent = `保存失败：${String(error)}`;
+    }
+  }
+}
+
+async function deleteSelectedFeedback() {
+  if (!feedbackSelected) return;
+  if (typeof window.confirm === "function" && !window.confirm("确定删除这条标注？")) return;
+  const removed = feedbackSelected;
+  try {
+    const response = await fetch("/api/sentence-feedback", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        document_key: removed.document_key,
+        page_num: removed.page_num,
+        sentence_index: removed.sentence_index,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    feedbackEntries = feedbackEntries.filter((entry) => entry.id !== removed.id);
+    feedbackSelected = null;
+    renderFeedbackEntries(feedbackSearch ? feedbackSearch.value : "");
+    if (feedbackContext) feedbackContext.textContent = "选择左侧标注进行编辑";
+    if (feedbackMeta) feedbackMeta.textContent = "";
+    if (feedbackNote) feedbackNote.value = "";
+    if (feedbackDelete) feedbackDelete.disabled = true;
+    if (feedbackLocate) feedbackLocate.disabled = true;
+    if (feedbackMessage) {
+      feedbackMessage.classList.remove("is-error");
+      feedbackMessage.textContent = "已删除标注。";
+    }
+    sentenceFeedbackItems = sentenceFeedbackItems.filter((entry) => entry.id !== removed.id);
+    syncFlagButtonRemoved(removed.id);
+  } catch (error) {
+    if (feedbackMessage) {
+      feedbackMessage.classList.add("is-error");
+      feedbackMessage.textContent = `删除失败：${String(error)}`;
+    }
+  }
+}
+
+function locateSelectedFeedback() {
+  if (!feedbackSelected || feedbackSelected.document_key !== currentDocumentKey) return;
+  closeFeedbackDialog();
+  scrollToPage(Number(feedbackSelected.page_num));
+}
+
+/* 文档内搜索：句子级命中（大小写不敏感），复用 mark 层高亮与页跳转导航。 */
+const runSearchDebounced = debounce(() => runSearch(), 180);
+let searchHits = [];
+let searchCurrent = -1;
+
+function openSearchPanel() {
+  if (!searchPanel) return;
+  searchPanel.hidden = false;
+  if (searchToggle) searchToggle.setAttribute("aria-expanded", "true");
+  if (searchInput) {
+    searchInput.focus();
+    searchInput.select();
+  }
+}
+
+function closeSearchPanel() {
+  if (!searchPanel) return;
+  searchPanel.hidden = true;
+  if (searchToggle) searchToggle.setAttribute("aria-expanded", "false");
+  clearSearchHighlights();
+  searchHits = [];
+  searchCurrent = -1;
+  if (searchCount) searchCount.textContent = "";
+}
+
+function clearSearchHighlights() {
+  for (const target of searchHits) {
+    toggleSentenceMarks(target, "is-search-current", false);
+    toggleSentenceMarks(target, "is-search-hit", false);
+  }
+}
+
+function runSearch() {
+  clearSearchHighlights();
+  searchHits = [];
+  searchCurrent = -1;
+  const query = String(searchInput && searchInput.value || "").trim().toLowerCase();
+  if (!query || !currentPdf) {
+    if (searchCount) searchCount.textContent = "";
+    return;
+  }
+  for (const target of pageSentenceTargets.values()) {
+    if (String(target.text || "").toLowerCase().includes(query)) searchHits.push(target);
+  }
+  searchHits.sort((a, b) => a.pageNum - b.pageNum || a.sentenceIndex - b.sentenceIndex);
+  if (searchCount) searchCount.textContent = searchHits.length ? `1 / ${searchHits.length}` : "无结果";
+  if (searchHits.length) focusSearchHit(0);
+}
+
+function focusSearchHit(index) {
+  if (index < 0 || index >= searchHits.length) return;
+  const previous = searchHits[searchCurrent];
+  if (previous && previous !== searchHits[index]) {
+    toggleSentenceMarks(previous, "is-search-current", false);
+    toggleSentenceMarks(previous, "is-search-hit", true);
+  }
+  searchCurrent = index;
+  const target = searchHits[index];
+  scrollToPage(target.pageNum);
+  // 页面按需挂载：滚动触发挂载后（IO 回调异步）再上高亮
+  window.setTimeout(() => {
+    toggleSentenceMarks(target, "is-search-hit", true);
+    toggleSentenceMarks(target, "is-search-current", true);
+  }, 320);
+  if (searchCount) searchCount.textContent = `${index + 1} / ${searchHits.length}`;
+}
+
+function navigateSearch(step) {
+  if (!searchHits.length) return;
+  focusSearchHit((searchCurrent + step + searchHits.length) % searchHits.length);
 }
 
 let currentPdf = null;
@@ -1152,8 +1433,19 @@ window.addEventListener("pointermove", (event) => { moveResize(event); moveNavRe
 window.addEventListener("pointerup", () => { endResize(); endNavResize(); });
 window.addEventListener("pointercancel", () => { endResize(); endNavResize(); });
 document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && String(event.key).toLowerCase() === "f") {
+    const active = document.activeElement;
+    const typing = active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
+    if (!typing) {
+      event.preventDefault();
+      openSearchPanel();
+    }
+    return;
+  }
   if (event.key === "Escape") {
-    if (complexWordDialog && !complexWordDialog.hidden) closeComplexWords();
+    if (feedbackDialog && !feedbackDialog.hidden) closeFeedbackDialog();
+    else if (searchPanel && !searchPanel.hidden) closeSearchPanel();
+    else if (complexWordDialog && !complexWordDialog.hidden) closeComplexWords();
     else if (glossaryDialog && !glossaryDialog.hidden) closeGlossary();
     else if ((outlinePanel && !outlinePanel.hidden) || (bookmarkPanel && !bookmarkPanel.hidden)) setNavigationPanel(null);
     else if (recentDocsMenu && !recentDocsMenu.hidden) closeRecentDocuments();
@@ -1226,6 +1518,39 @@ if (glossaryBackupRestore) glossaryBackupRestore.addEventListener("click", resto
 if (glossaryBackupDownload) glossaryBackupDownload.addEventListener("click", downloadGlossaryBackup);
 if (glossaryBackupDelete) glossaryBackupDelete.addEventListener("click", deleteGlossaryBackup);
 if (glossaryDialog) glossaryDialog.addEventListener("click", (event) => { if (event.target === glossaryDialog) closeGlossary(); });
+if (feedbackToggle) feedbackToggle.addEventListener("click", () => openFeedbackDialog());
+if (feedbackClose) feedbackClose.addEventListener("click", closeFeedbackDialog);
+if (feedbackDialog) feedbackDialog.addEventListener("click", (event) => { if (event.target === feedbackDialog) closeFeedbackDialog(); });
+if (feedbackSearch) feedbackSearch.addEventListener("input", (event) => renderFeedbackEntries(event.target.value));
+if (feedbackList) feedbackList.addEventListener("click", (event) => {
+  const entry = event.target && event.target.closest ? event.target.closest("[data-feedback-id]") : null;
+  if (entry) selectFeedbackEntry(entry.dataset.feedbackId);
+});
+if (feedbackForm) feedbackForm.addEventListener("submit", saveSelectedFeedback);
+if (feedbackDelete) feedbackDelete.addEventListener("click", deleteSelectedFeedback);
+if (feedbackLocate) feedbackLocate.addEventListener("click", locateSelectedFeedback);
+if (searchToggle) searchToggle.addEventListener("click", () => (searchPanel && searchPanel.hidden ? openSearchPanel() : closeSearchPanel()));
+if (searchClose) searchClose.addEventListener("click", closeSearchPanel);
+if (searchInput) {
+  searchInput.addEventListener("input", runSearchDebounced);
+  searchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      navigateSearch(event.shiftKey ? -1 : 1);
+    }
+  });
+}
+if (searchPrev) searchPrev.addEventListener("click", () => navigateSearch(-1));
+if (searchNext) searchNext.addEventListener("click", () => navigateSearch(1));
+if (pageJumpForm) pageJumpForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const value = Number.parseInt(pageJump && pageJump.value, 10);
+  if (Number.isFinite(value) && currentPdf && value >= 1 && value <= currentPdf.numPages) {
+    scrollToPage(value);
+  } else if (pageJump) {
+    pageJump.value = "";
+  }
+});
 if (zoomOut) zoomOut.addEventListener("click", () => setPdfZoom(pdfZoom - .1));
 if (zoomReset) zoomReset.addEventListener("click", () => setPdfZoom(1));
 if (zoomIn) zoomIn.addEventListener("click", () => setPdfZoom(pdfZoom + .1));

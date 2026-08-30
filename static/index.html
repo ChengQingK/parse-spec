@@ -32,8 +32,10 @@
   </div>
   <button class="icon-btn outline-toggle" id="outline-toggle" type="button" aria-expanded="false" aria-controls="outline-panel" aria-label="打开 PDF 目录">目录</button>
   <button class="icon-btn bookmark-toggle" id="bookmark-toggle" type="button" aria-expanded="false" aria-controls="bookmark-panel" aria-label="打开书签">书签</button>
+  <button class="icon-btn" id="search-toggle" type="button" aria-expanded="false" aria-controls="search-panel" aria-label="在文档中搜索（Ctrl+F）">搜索</button>
   <button class="icon-btn" id="complex-word-toggle" type="button" aria-expanded="false" aria-controls="complex-word-dialog">复杂词</button>
   <button class="icon-btn glossary-toggle" id="glossary-toggle" type="button" aria-expanded="false" aria-controls="glossary-dialog">术语表</button>
+  <button class="icon-btn feedback-toggle" id="feedback-toggle" type="button" aria-expanded="false" aria-controls="feedback-dialog" aria-label="管理异常句子标注">标注管理</button>
   <button class="icon-btn panel-toggle" id="panel-toggle" type="button" aria-expanded="true" aria-controls="analysis-panel">收起分析</button>
   <label class="btn filebtn">选择 PDF
     <input type="file" id="file" accept="application/pdf" hidden>
@@ -67,6 +69,13 @@
   <div id="nav-resizer" class="nav-resizer" role="separator" aria-label="调整导航栏宽度" aria-orientation="vertical" tabindex="0"></div>
 
   <section id="doc" class="document-pane" aria-label="PDF 阅读区">
+    <form id="search-panel" class="search-panel" role="search" aria-label="文档内搜索" hidden>
+      <input id="search-input" type="text" autocomplete="off" placeholder="在文档中搜索…（回车跳转，Esc 关闭）" aria-label="搜索文档文本">
+      <span id="search-count" class="search-count" aria-live="polite"></span>
+      <button id="search-prev" class="icon-btn search-nav" type="button" aria-label="上一处">↑</button>
+      <button id="search-next" class="icon-btn search-nav" type="button" aria-label="下一处">↓</button>
+      <button id="search-close" class="icon-btn close-btn search-close" type="button" aria-label="关闭搜索"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></svg></button>
+    </form>
     <div class="placeholder" id="placeholder">
       <span class="placeholder-mark">PS</span>
       <h1>打开一篇英文 SPEC</h1>
@@ -120,12 +129,42 @@
     </button>
   </div>
   <div id="page-status" class="page-status" aria-live="polite">— / —</div>
+  <form id="page-jump-form" class="page-jump" aria-label="按页码跳页">
+    <input id="page-jump" type="text" inputmode="numeric" autocomplete="off" placeholder="页码" aria-label="输入页码后回车跳页">
+  </form>
   <div class="zoom-controls" aria-label="PDF 缩放">
     <button id="zoom-out" class="bottom-icon-btn" type="button" aria-label="缩小 PDF"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4.5 10h11"/></svg></button>
     <button id="zoom-reset" class="zoom-value" type="button" aria-label="恢复 PDF 为 100%">100%</button>
     <button id="zoom-in" class="bottom-icon-btn" type="button" aria-label="放大 PDF"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11"/></svg></button>
   </div>
 </footer>
+
+<section id="feedback-dialog" class="glossary-dialog" role="dialog" aria-modal="true" aria-labelledby="feedback-title" hidden>
+  <div class="glossary-shell">
+    <header class="glossary-header">
+      <div><div class="eyebrow">阅读反馈</div><h2 id="feedback-title">异常句子标注</h2></div>
+      <button class="icon-btn close-btn" id="feedback-close" type="button" aria-label="关闭标注管理"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></svg></button>
+    </header>
+    <div class="glossary-body">
+      <section class="glossary-browser">
+        <label class="glossary-search-label" for="feedback-search">搜索标注</label>
+        <input id="feedback-search" class="glossary-search" type="search" placeholder="原句、意见或文档名">
+        <div id="feedback-list" class="glossary-list" aria-live="polite"></div>
+      </section>
+      <form id="feedback-form" class="glossary-form">
+        <div><div class="eyebrow">标注详情</div><h3 id="feedback-context">选择左侧标注进行编辑</h3></div>
+        <div id="feedback-meta" class="feedback-meta"></div>
+        <label class="feedback-note-label">读者意见<textarea id="feedback-note" name="note" maxlength="2000" rows="6" placeholder="标注时写下的意见…"></textarea></label>
+        <p id="feedback-message" class="glossary-message" aria-live="polite">标注会记录原句与解析快照，供批量改进解析与译文。</p>
+        <div class="glossary-form-actions">
+          <button id="feedback-locate" class="secondary-action" type="button" disabled>在 PDF 中定位</button>
+          <button id="feedback-delete" class="secondary-action danger-action" type="button" disabled>删除标注</button>
+          <button id="feedback-save" class="btn" type="submit">保存意见</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</section>
 
 <section id="glossary-dialog" class="glossary-dialog" role="dialog" aria-modal="true" aria-labelledby="glossary-title" hidden>
   <div class="glossary-shell">

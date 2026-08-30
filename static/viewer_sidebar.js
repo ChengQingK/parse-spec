@@ -1047,9 +1047,9 @@
       <div class="flag-form" id="sentence-flag-form" hidden>
         <textarea id="sentence-flag-note" rows="3" maxlength="2000" placeholder="可选：说明哪里读不通、期望的正确结构是什么…">${flagged ? esc(feedbackNote) : ""}</textarea>
         <div class="flag-actions">
-          <button class="flag-save" type="button">保存标注</button>
-          <button class="flag-delete" type="button"${flagged ? "" : " disabled"}>删除标注</button>
-          <button class="flag-cancel" type="button">取消</button>
+          <button class="flag-save btn" type="button">保存标注</button>
+          <button class="flag-delete secondary-action danger-action" type="button"${flagged ? "" : " disabled"}>删除标注</button>
+          <button class="flag-cancel secondary-action" type="button">取消</button>
         </div>
         <div class="flag-message" aria-live="polite"></div>
       </div>

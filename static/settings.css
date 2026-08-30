@@ -40,6 +40,10 @@ html[data-theme="dark"] {
   --relative: #6fc6e8;
   --basis: #9aa8bc;
   --content: #8d9ab0;
+  /* PDF 页面纳入主题：白底位图反色并回旋色相，纸张底色随面板 */
+  --pdf-canvas-filter: invert(0.92) hue-rotate(180deg);
+  --pdf-canvas-blend: normal;
+  --pdf-page-bg: #10151f;
 }
 
 html[data-theme="eye"] {
@@ -72,4 +76,8 @@ html[data-theme="eye"] {
   --danger-soft: #f4e3df;
   --selected: rgba(79, 115, 84, .25);
   --preview: rgba(192, 155, 56, .22);
+  /* 护眼主题：白底位图用 multiply 染成暖纸色，黑字与线稿保持原样 */
+  --pdf-canvas-filter: none;
+  --pdf-canvas-blend: multiply;
+  --pdf-page-bg: #ece5c8;
 }

@@ -23,6 +23,10 @@
 }
 
 .sentence-mark.is-preview { background: var(--preview); }
+
+/* 搜索命中：全部命中用绿色系底，当前命中用橙色底加强 */
+.sentence-mark.is-search-hit { background: color-mix(in srgb, var(--condition) 30%, transparent); }
+.sentence-mark.is-search-current { background: color-mix(in srgb, var(--cause) 42%, transparent); }
 .sentence-mark.is-selected {
   background: var(--selected);
   box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent) 55%, transparent);
