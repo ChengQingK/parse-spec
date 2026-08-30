@@ -11,5 +11,9 @@
 *.json text eol=lf
 *.txt text eol=lf
 
+# Batch files: cmd.exe needs CRLF and cannot tolerate UTF-8 non-ASCII (GBK codepage)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
 *.pdf binary
 *.whl binary

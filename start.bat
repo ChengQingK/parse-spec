@@ -1,33 +1,44 @@
 @echo off
-rem Parse-Spec 一键启动：双击运行即可。使用项目 .venv 中的解释器启动本地服务，
-rem 服务就绪后自动打开默认浏览器；终端保持前台可看日志，Ctrl+C 停止。
+rem Parse-Spec one-click launcher: uses the project .venv to run server.py.
+rem The server opens the default browser once it is ready. Keep this window
+rem open while reading; press Ctrl+C to stop the server.
+rem NOTE: keep this file ASCII-only and CRLF - cmd.exe mis-parses UTF-8 batch files.
 setlocal
 cd /d "%~dp0"
 
 set "PYTHON=%CD%\.venv\Scripts\python.exe"
 
-if not exist "%PYTHON%" (
-  echo [parse-spec] 未找到 .venv 虚拟环境，尝试用 uv 创建...
-  where uv >nul 2>nul
-  if errorlevel 1 (
-    echo [parse-spec] 缺少 uv。请先执行以下命令初始化环境后重试：
-    echo   uv venv --python 3.11 .venv
-    echo   uv pip install --python .venv\Scripts\python.exe -r requirements.txt .\vendor\en_core_web_sm-3.8.0-py3-none-any.whl
-    pause
-    exit /b 1
-  )
-  uv venv --python 3.11 .venv || (pause & exit /b 1)
-  uv pip install --python "%PYTHON%" -r requirements.txt .\vendor\en_core_web_sm-3.8.0-py3-none-any.whl || (pause & exit /b 1)
-)
+if exist "%PYTHON%" goto :run
 
-echo [parse-spec] 启动服务中，浏览器将自动打开；停止服务请按 Ctrl+C。
+echo [parse-spec] .venv not found. Trying to create it with uv...
+where uv >nul 2>nul
+if errorlevel 1 goto :no-uv
+uv venv --python 3.11 .venv
+if errorlevel 1 goto :failed
+uv pip install --python "%PYTHON%" -r requirements.txt .\vendor\en_core_web_sm-3.8.0-py3-none-any.whl
+if errorlevel 1 goto :failed
+
+:run
+echo [parse-spec] Starting server... your browser will open automatically.
+echo [parse-spec] Press Ctrl+C in this window to stop the server.
 set "PARSE_SPEC_OPEN_BROWSER=1"
 "%PYTHON%" server.py
 set "EXITCODE=%ERRORLEVEL%"
 if not "%EXITCODE%"=="0" (
   echo.
-  echo [parse-spec] 服务异常退出（代码 %EXITCODE%），请查看上方日志。
+  echo [parse-spec] Server exited with code %EXITCODE%. Check the log above.
   pause
 )
-endlocal
-exit /b %EXITCODE%
+endlocal & exit /b %EXITCODE%
+
+:no-uv
+echo [parse-spec] uv was not found. Initialize the environment manually:
+echo   uv venv --python 3.11 .venv
+echo   uv pip install --python .venv\Scripts\python.exe -r requirements.txt .\vendor\en_core_web_sm-3.8.0-py3-none-any.whl
+pause
+exit /b 1
+
+:failed
+echo [parse-spec] Environment setup failed. Check the log above.
+pause
+exit /b 1
